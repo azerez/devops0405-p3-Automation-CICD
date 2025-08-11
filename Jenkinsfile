@@ -7,10 +7,8 @@ pipeline {
     CHART_NAME  = 'flaskapp'
     RELEASE_DIR = '.release'
 
-    // Docker image to build & push
     DOCKER_IMAGE = 'erezazu/devops0405-docker-flask-app'
 
-    // GitHub repo & pages
     REPO_URL  = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
     PAGES_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
   }
@@ -109,9 +107,7 @@ pipeline {
 
   post {
     always {
-      stage('Declarative: Post Actions') {
-        cleanWs()
-      }
+      cleanWs()
     }
   }
 }
