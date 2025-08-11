@@ -11,8 +11,8 @@ pipeline {
     DOCKER_IMAGE = 'erezazu/devops0405-docker-flask-app'
 
     // GitHub repo & pages
-    REPO_URL     = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
-    PAGES_URL    = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
+    REPO_URL  = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
+    PAGES_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
   }
 
   stages {
@@ -23,7 +23,6 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Short git SHA for tagging chart + image
           env.GIT_SHA = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
@@ -52,7 +51,7 @@ pipeline {
     stage('Package Chart') {
       steps {
         powershell """
-          mkdir ${env.RELEASE_DIR} 2>$null | Out-Null
+          New-Item -ItemType Directory -Force -Path '${env.RELEASE_DIR}' | Out-Null
           helm package ${env.CHART_DIR} -d ${env.RELEASE_DIR}
         """
       }
@@ -67,7 +66,6 @@ pipeline {
             mkdir docs 2>NUL || ver > NUL
             move /Y ${env.RELEASE_DIR}\\*.tgz docs\\
           """
-          // regenerate index.yaml
           powershell """
             helm repo index docs --url ${env.PAGES_URL}
           """
@@ -119,9 +117,8 @@ pipeline {
 }
 
 /**
- * Safely bump Chart.yaml (patch) + set appVersion=GIT_SHA
- * and make sure values.yaml contains the right repo and an empty tag.
- * Avoids non-serializable objects (no Matchers kept) and preserves valid YAML.
+ * Bump Chart.yaml patch + set appVersion = GIT_SHA,
+ * and ensure values.yaml has the right repo and empty tag.
  */
 def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String dockerImage) {
   // ---- Chart.yaml ----
@@ -132,9 +129,9 @@ def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String doc
 
   chart.readLines().each { ln ->
     if (!bumped && ln.trim() ==~ /version:\s*\d+\.\d+\.\d+.*/) {
-      def nums   = ln.replaceFirst(/.*version:\s*/, '').trim()
-      def parts  = nums.tokenize('.')
-      int patch  = (parts[2] as int) + 1
+      def nums  = ln.replaceFirst(/.*version:\s*/, '').trim()
+      def parts = nums.tokenize('.')
+      int patch = (parts[2] as int) + 1
       out << "version: ${parts[0]}.${parts[1]}.${patch}"
       bumped = true
     } else if (!appSet && ln.trim().startsWith('appVersion:')) {
@@ -152,7 +149,6 @@ def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String doc
   List<String> vout = []
   vals.readLines().each { ln ->
     if (ln.trim().startsWith('repository:')) {
-      // keep basic two-space indent that already exists in file
       vout << "  repository: ${dockerImage}"
     } else if (ln.trim().startsWith('tag:')) {
       vout << '  tag: ""'
