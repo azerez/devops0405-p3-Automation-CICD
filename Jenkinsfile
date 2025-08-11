@@ -5,9 +5,7 @@ pipeline {
     APP_NAME      = 'flaskapp'
     HELM_DIR      = 'helm/flaskapp'
     PAGES_DIR     = 'docs'
-    // Public Helm repo URL (GitHub Pages) — NOTE: no trailing /docs
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
-    // GitHub owner/repo (used for pushing to gh-pages)
     REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
@@ -17,18 +15,13 @@ pipeline {
 
   stages {
     stage('Checkout') {
-      steps {
-        // Pull the branch/PR that triggered this build
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Helm Lint') {
-      // Run only if something under "helm/**" changed
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        // Validate Helm chart structure/templates
-        sh "helm lint ${HELM_DIR}"
+        powershell 'helm lint ${env:HELM_DIR}'
       }
     }
 
@@ -36,92 +29,93 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // Short commit SHA for traceability (used as appVersion/tag)
-          env.GIT_SHA = sh(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
         }
-        sh """
-          set -e
-          CHART=${HELM_DIR}/Chart.yaml
-          VALS=${HELM_DIR}/values.yaml
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          $CHART = "${env:HELM_DIR}/Chart.yaml"
+          $VALS  = "${env:HELM_DIR}/values.yaml"
 
-          # Read current chart version (SemVer: x.y.z) and bump the patch
-          CUR_VER=$(awk '/^version:/{print $2}' "$CHART")
-          MAJOR=\${CUR_VER%%.*}
-          REST=\${CUR_VER#*.}
-          MINOR=\${REST%%.*}
-          PATCH=\${REST#*.}
-          PATCH=\$((PATCH+1))
-          NEW_VER="\$MAJOR.\$MINOR.\$PATCH"
+          # Read and bump SemVer patch in Chart.yaml
+          $content = Get-Content $CHART
+          $m = Select-String -InputObject $content -Pattern '^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)\s*$'
+          if (-not $m) { throw "version: not found in Chart.yaml" }
+          $i = $m.LineNumber - 1
+          $major = [int]$m.Matches[0].Groups[1].Value
+          $minor = [int]$m.Matches[0].Groups[2].Value
+          $patch = ([int]$m.Matches[0].Groups[3].Value) + 1
+          $newVer = "$major.$minor.$patch"
+          $content[$i] = "version: $newVer"
 
-          # Update 'version' in Chart.yaml
-          awk -v nv="\$NEW_VER" '/^version:/{\$2=nv} {print}' "$CHART" > "$CHART.tmp" && mv "$CHART.tmp" "$CHART"
+          # Set/append appVersion to current git sha
+          $mApp = Select-String -InputObject $content -Pattern '^\s*appVersion:\s*'
+          if ($mApp) {
+            $content[$mApp.LineNumber[0]-1] = "appVersion: ${env:GIT_SHA}"
+          } else {
+            $content += "appVersion: ${env:GIT_SHA}"
+          }
+          Set-Content -NoNewline -Path $CHART -Value ($content -join "`n")
 
-          # Update/append 'appVersion' in Chart.yaml to current Git SHA
-          if grep -q '^appVersion:' "$CHART"; then
-            awk -v av="${GIT_SHA}" '/^appVersion:/{\$2=av} {print}' "$CHART" > "$CHART.tmp" && mv "$CHART.tmp" "$CHART"
-          else
-            echo "appVersion: ${GIT_SHA}" >> "$CHART"
-          fi
+          # Update image tag in values.yaml if a 'tag:' key exists
+          if (Test-Path $VALS) {
+            $vals = Get-Content $VALS
+            $mTag = Select-String -InputObject $vals -Pattern '^\s*tag:\s*'
+            if ($mTag) {
+              $vals[$mTag.LineNumber[0]-1] = "  tag: `"${env:GIT_SHA}`""
+              Set-Content -NoNewline -Path $VALS -Value ($vals -join "`n")
+            }
+          }
 
-          # If values.yaml has 'tag:' under image, set it to the current Git SHA (best-effort)
-          sed -i -E 's#(^\\s*tag:\\s*).+#\\1\"${GIT_SHA}\"#' "$VALS" || true
-
-          echo "Bumped chart version to \$NEW_VER; image tag -> ${GIT_SHA}"
-        """
+          Write-Host "Bumped chart version to $newVer ; image tag -> ${env:GIT_SHA}"
+        '''
       }
     }
 
     stage('Package Chart') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        sh """
-          set -e
-          rm -rf .release
-          mkdir -p .release
-          cd ${HELM_DIR}
-          # Create the .tgz package from the chart
-          helm package .
-          # Move the latest package to a staging folder at repo root
-          mv ${APP_NAME}-*.tgz ../../.release/
-        """
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
+          New-Item -ItemType Directory ".release" | Out-Null
+          helm package ${env:HELM_DIR}
+          Move-Item "${env:HELM_DIR}\\${env:APP_NAME}-*.tgz" ".release\\" -Force
+        '''
       }
     }
 
     stage('Publish to gh-pages') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        // Use your GitHub PAT stored as Jenkins credential "github-token"
         withCredentials([string(credentialsId: 'github-token', variable: 'GHTOKEN')]) {
-          sh """
-            set -e
-            CURR=\$(git rev-parse --abbrev-ref HEAD)
+          powershell '''
+            $ErrorActionPreference = "Stop"
+            $CURR = (git rev-parse --abbrev-ref HEAD).Trim()
 
-            # Configure Git identity for the commit
-            git config user.email "${GIT_EMAIL}"
-            git config user.name  "${GIT_NAME}"
+            git config user.email "${env:GIT_EMAIL}"
+            git config user.name  "${env:GIT_NAME}"
 
-            # Switch to gh-pages (create it orphaned if missing)
-            git fetch origin gh-pages || true
-            git checkout gh-pages || git checkout --orphan gh-pages
+            git fetch origin gh-pages 2>$null
+            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
+              git checkout --orphan gh-pages
+              git rm -rf . 2>$null
+            } else {
+              git checkout gh-pages
+            }
 
-            # Ensure GitHub Pages folder exists and Jekyll is disabled
-            mkdir -p ${PAGES_DIR}
-            touch ${PAGES_DIR}/.nojekyll
+            New-Item -ItemType Directory "${env:PAGES_DIR}" -Force | Out-Null
+            New-Item -ItemType File "${env:PAGES_DIR}/.nojekyll" -Force | Out-Null
+            Move-Item ".release\\*.tgz" "${env:PAGES_DIR}\\" -Force
 
-            # Move packaged chart into docs/
-            mv -f .release/*.tgz ${PAGES_DIR}/
+            helm repo index "${env:PAGES_DIR}" --url ${env:HELM_REPO_URL}
 
-            # Rebuild index.yaml with correct public URL (no /docs suffix)
-            helm repo index ${PAGES_DIR} --url ${HELM_REPO_URL}
+            git add ${env:PAGES_DIR}
+            git commit -m "publish chart ${env:APP_NAME} ${env:GIT_SHA}" 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "Nothing to commit"; }
 
-            # Commit and push to gh-pages using the PAT
-            git add ${PAGES_DIR}
-            git commit -m "publish chart ${APP_NAME} ${GIT_SHA}" || true
-[O            git push https://${GHTOKEN}@github.com/${REPO_SLUG}.git gh-pages
+            git push "https://${env:GHTOKEN}@github.com/${env:REPO_SLUG}.git" gh-pages
 
-            # Return to the original branch
-            git checkout "\$CURR"
-          """
+            git checkout $CURR
+          '''
         }
       }
     }
