@@ -1,10 +1,9 @@
-// ---------- Helpers (non-CPS, safe for Jenkins sandbox) ----------
+// ---------- Helpers ----------
 @NonCPS
 String bumpChartYaml(String text, String sha) {
-  // Work with List<String> to avoid ArrayStoreException with GString
   List<String> lines = (text.split(/\r?\n/, -1) as List<String>)
 
-  // bump semantic patch version: X.Y.Z -> X.Y.(Z+1)
+  // bump X.Y.Z -> X.Y.(Z+1)
   int verIdx = lines.findIndexOf { it ==~ /^\s*version:\s*\d+\.\d+\.\d+\s*$/ }
   if (verIdx >= 0) {
     def m = (lines[verIdx] =~ /(\d+)\.(\d+)\.(\d+)/)[0]
@@ -12,14 +11,13 @@ String bumpChartYaml(String text, String sha) {
     lines[verIdx] = ("version: ${m[1]}.${m[2]}.${patch}").toString()
   }
 
-  // set appVersion to current short git SHA
+  // set appVersion (quoted)
   int appIdx = lines.findIndexOf { it ==~ /^\s*appVersion:\s*.*/ }
   if (appIdx >= 0) {
-    lines[appIdx] = ("appVersion: ${sha}").toString()
+    lines[appIdx] = ("appVersion: \"${sha}\"").toString()
   } else {
-    lines.add(("appVersion: ${sha}").toString())
+    lines.add(("appVersion: \"${sha}\"").toString())
   }
-
   return lines.join('\n') + '\n'
 }
 
@@ -43,10 +41,7 @@ String bumpValuesTag(String text, String sha) {
 // ---------------------- Pipeline ----------------------
 pipeline {
   agent any
-  options {
-    timestamps()
-    skipDefaultCheckout(true)
-  }
+  options { timestamps(); skipDefaultCheckout(true) }
 
   environment {
     CHART_DIR    = 'helm/flaskapp'
@@ -55,27 +50,20 @@ pipeline {
   }
 
   stages {
-
-    stage('Checkout SCM') {
-      steps { checkout scm }
-    }
+    stage('Checkout SCM') { steps { checkout scm } }
 
     stage('Init (capture SHA)') {
       steps {
         script {
-          env.GIT_SHA = bat(
-            returnStdout: true,
-            script: 'git rev-parse --short HEAD'
-          ).trim()
+          // Return ONLY the SHA (no שורת פקודה)
+          env.GIT_SHA = powershell(returnStdout: true, script: '(git rev-parse --short HEAD).Trim()').trim()
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
       }
     }
 
     stage('Helm Lint') {
-      steps {
-        powershell 'helm lint ${env:CHART_DIR}'
-      }
+      steps { powershell 'helm lint ${env:CHART_DIR}' }
     }
 
     stage('Bump Chart Version (patch)') {
@@ -84,11 +72,11 @@ pipeline {
           def chartPath  = "${env.CHART_DIR}/Chart.yaml"
           def valuesPath = "${env.CHART_DIR}/values.yaml"
 
-          def chartTxt  = readFile(chartPath)
-          def valuesTxt = readFile(valuesPath)
+          def chartTxt   = readFile(chartPath)
+          def valuesTxt  = readFile(valuesPath)
 
-          def newChart  = bumpChartYaml(chartTxt,  env.GIT_SHA)
-          def newValues = bumpValuesTag(valuesTxt, env.GIT_SHA)
+          def newChart   = bumpChartYaml(chartTxt,  env.GIT_SHA)
+          def newValues  = bumpValuesTag(valuesTxt, env.GIT_SHA)
 
           writeFile(file: chartPath,  text: newChart)
           writeFile(file: valuesPath, text: newValues)
@@ -113,16 +101,12 @@ pipeline {
           script {
             env.REMOTE_URL = "https://${GHTOKEN}@github.com/azerez/devops0405-p3-Automation-CICD.git"
           }
-
-          // Prepare a worktree for gh-pages (no branch switching in main worktree)
           bat '''
             if exist ghp ( rmdir /s /q ghp )
             git worktree prune
             git fetch origin gh-pages
             git worktree add ghp gh-pages
           '''
-
-          // Copy artifact and update index.yaml
           powershell '''
             $pkg = Get-ChildItem -Path "${env:RELEASE_DIR}" -Filter "*.tgz" | Select-Object -First 1
             New-Item -ItemType Directory -Force -Path "ghp/docs" | Out-Null
@@ -134,8 +118,6 @@ pipeline {
               helm repo index "ghp/docs"
             }
           '''
-
-          // Commit and push
           bat '''
             cd ghp
             git config user.email "ci@example.com"
@@ -175,8 +157,6 @@ pipeline {
     }
   }
 
-  post {
-    always { cleanWs() }
-  }
+  post { always { cleanWs() } }
 }
 
