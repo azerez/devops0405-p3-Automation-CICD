@@ -27,18 +27,19 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // current commit short SHA
-          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+          // Get short SHA via PowerShell and keep ONLY the last line
+          def out = powershell(returnStdout: true, script: '(git rev-parse --short HEAD) | Select-Object -Last 1')
+          env.GIT_SHA = out.trim()
 
           def chartPath = "${HELM_DIR}/Chart.yaml"
           def valsPath  = "${HELM_DIR}/values.yaml"
           def chartText = readFile(chartPath)
           def lines     = chartText.readLines()
 
-          // --- bump version: x.y.z -> x.y.(z+1) (no regex matcher kept) ---
+          // bump version: x.y.z -> x.y.(z+1)
           int verIdx = lines.findIndexOf { it.trim().startsWith('version:') }
           if (verIdx < 0) { error("version: not found in ${chartPath}") }
-          def verStr = lines[verIdx].split(':', 2)[1].trim()   // after "version:"
+          def verStr = lines[verIdx].split(':', 2)[1].trim()
           def parts  = verStr.tokenize('.')
           if (parts.size() < 3) { error("invalid SemVer in ${chartPath}: ${verStr}") }
           int major = parts[0] as int
@@ -47,14 +48,14 @@ pipeline {
           def newVer = "${major}.${minor}.${patch}"
           lines[verIdx] = "version: ${newVer}"
 
-          // --- set/append appVersion to current git sha ---
+          // set/append appVersion to current git sha
           int appIdx = lines.findIndexOf { it.trim().startsWith('appVersion:') }
           if (appIdx >= 0) { lines[appIdx] = "appVersion: ${env.GIT_SHA}" }
           else { lines += "appVersion: ${env.GIT_SHA}" }
 
           writeFile file: chartPath, text: lines.join("\n")
 
-          // --- update image tag in values.yaml if 'tag:' line exists ---
+          // update image tag in values.yaml if present
           if (fileExists(valsPath)) {
             def vLines = readFile(valsPath).readLines()
             int tagIdx = vLines.findIndexOf { it.trim().startsWith('tag:') }
@@ -93,7 +94,7 @@ pipeline {
             git config user.name  "$env:GIT_NAME"
 
             git fetch origin gh-pages 2>$null
-[O            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
+            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
               git checkout --orphan gh-pages
               git rm -rf . 2>$null
             } else {
