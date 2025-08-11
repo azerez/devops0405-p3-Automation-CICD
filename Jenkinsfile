@@ -5,7 +5,9 @@ pipeline {
     APP_NAME      = 'flaskapp'
     HELM_DIR      = 'helm/flaskapp'
     PAGES_DIR     = 'docs'
+    // Public Helm repo URL (GitHub Pages) — no trailing /docs
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
+    // GitHub owner/repo used for pushing to gh-pages
     REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
@@ -19,9 +21,10 @@ pipeline {
     }
 
     stage('Helm Lint') {
+      // Run only if something under "helm/**" changed
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        powershell 'helm lint ${env:HELM_DIR}'
+        powershell 'helm lint $env:HELM_DIR'
       }
     }
 
@@ -29,12 +32,13 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
+          // Short commit SHA for traceability
           env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
         }
         powershell '''
           $ErrorActionPreference = "Stop"
-          $CHART = "${env:HELM_DIR}/Chart.yaml"
-          $VALS  = "${env:HELM_DIR}/values.yaml"
+          $CHART = "$env:HELM_DIR/Chart.yaml"
+          $VALS  = "$env:HELM_DIR/values.yaml"
 
           # Read and bump SemVer patch in Chart.yaml
           $content = Get-Content $CHART
@@ -78,8 +82,9 @@ pipeline {
           $ErrorActionPreference = "Stop"
           if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
           New-Item -ItemType Directory ".release" | Out-Null
-          helm package ${env:HELM_DIR}
-          Move-Item "${env:HELM_DIR}\\${env:APP_NAME}-*.tgz" ".release\\" -Force
+
+          # Create the package directly into .release (no need to move afterward)
+          helm package $env:HELM_DIR --destination .release
         '''
       }
     }
@@ -92,8 +97,8 @@ pipeline {
             $ErrorActionPreference = "Stop"
             $CURR = (git rev-parse --abbrev-ref HEAD).Trim()
 
-            git config user.email "${env:GIT_EMAIL}"
-            git config user.name  "${env:GIT_NAME}"
+            git config user.email "$env:GIT_EMAIL"
+            git config user.name  "$env:GIT_NAME"
 
             git fetch origin gh-pages 2>$null
             if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
@@ -103,16 +108,19 @@ pipeline {
               git checkout gh-pages
             }
 
-            New-Item -ItemType Directory "${env:PAGES_DIR}" -Force | Out-Null
-            New-Item -ItemType File "${env:PAGES_DIR}/.nojekyll" -Force | Out-Null
-            Move-Item ".release\\*.tgz" "${env:PAGES_DIR}\\" -Force
+            New-Item -ItemType Directory "$env:PAGES_DIR" -Force | Out-Null
+            New-Item -ItemType File "$env:PAGES_DIR/.nojekyll" -Force | Out-Null
 
-            helm repo index "${env:PAGES_DIR}" --url ${env:HELM_REPO_URL}
+            # Move the chart package(s) into docs/
+            Move-Item ".release\\*.tgz" "$env:PAGES_DIR\\" -Force
 
-            git add ${env:PAGES_DIR}
-            git commit -m "publish chart ${env:APP_NAME} ${env:GIT_SHA}" 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "Nothing to commit"; }
+            # Rebuild index.yaml with the correct public URL
+            helm repo index "$env:PAGES_DIR" --url $env:HELM_REPO_URL
 
-            git push "https://${env:GHTOKEN}@github.com/${env:REPO_SLUG}.git" gh-pages
+            git add $env:PAGES_DIR
+            git commit -m "publish chart $env:APP_NAME $env:GIT_SHA" 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "Nothing to commit"; }
+
+            git push "https://$env:GHTOKEN@github.com/$env:REPO_SLUG.git" gh-pages
 
             git checkout $CURR
           '''
