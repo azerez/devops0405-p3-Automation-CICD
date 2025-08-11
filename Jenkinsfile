@@ -5,9 +5,7 @@ pipeline {
     APP_NAME      = 'flaskapp'
     HELM_DIR      = 'helm/flaskapp'
     PAGES_DIR     = 'docs'
-    // Public Helm repo URL (GitHub Pages) — no trailing /docs
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
-    // GitHub owner/repo used for pushing to gh-pages
     REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
@@ -21,20 +19,14 @@ pipeline {
     }
 
     stage('Helm Lint') {
-      // Run only if something under "helm/**" changed
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
-      steps {
-        powershell 'helm lint $env:HELM_DIR'
-      }
+      steps { powershell 'helm lint $env:HELM_DIR' }
     }
 
     stage('Bump Chart Version (patch)') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        script {
-          // Short commit SHA for traceability
-          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
-        }
+        script { env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim() }
         powershell '''
           $ErrorActionPreference = "Stop"
           $CHART = "$env:HELM_DIR/Chart.yaml"
@@ -42,7 +34,7 @@ pipeline {
 
           # Read and bump SemVer patch in Chart.yaml
           $content = Get-Content $CHART
-          $m = Select-String -InputObject $content -Pattern '^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)\s*$'
+          $m = Select-String -InputObject $content -Pattern "^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)\s*$"
           if (-not $m) { throw "version: not found in Chart.yaml" }
           $i = $m.LineNumber - 1
           $major = [int]$m.Matches[0].Groups[1].Value
@@ -52,7 +44,7 @@ pipeline {
           $content[$i] = "version: $newVer"
 
           # Set/append appVersion to current git sha
-          $mApp = Select-String -InputObject $content -Pattern '^\s*appVersion:\s*'
+          $mApp = Select-String -InputObject $content -Pattern "^\s*appVersion:\s*"
           if ($mApp) {
             $content[$mApp.LineNumber[0]-1] = "appVersion: ${env:GIT_SHA}"
           } else {
@@ -63,7 +55,7 @@ pipeline {
           # Update image tag in values.yaml if a 'tag:' key exists
           if (Test-Path $VALS) {
             $vals = Get-Content $VALS
-            $mTag = Select-String -InputObject $vals -Pattern '^\s*tag:\s*'
+            $mTag = Select-String -InputObject $vals -Pattern "^\s*tag:\s*"
             if ($mTag) {
               $vals[$mTag.LineNumber[0]-1] = "  tag: `"${env:GIT_SHA}`""
               Set-Content -NoNewline -Path $VALS -Value ($vals -join "`n")
@@ -82,8 +74,7 @@ pipeline {
           $ErrorActionPreference = "Stop"
           if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
           New-Item -ItemType Directory ".release" | Out-Null
-
-          # Create the package directly into .release (no need to move afterward)
+          # Create the package directly into .release (no move needed)
           helm package $env:HELM_DIR --destination .release
         '''
       }
@@ -111,10 +102,8 @@ pipeline {
             New-Item -ItemType Directory "$env:PAGES_DIR" -Force | Out-Null
             New-Item -ItemType File "$env:PAGES_DIR/.nojekyll" -Force | Out-Null
 
-            # Move the chart package(s) into docs/
             Move-Item ".release\\*.tgz" "$env:PAGES_DIR\\" -Force
 
-            # Rebuild index.yaml with the correct public URL
             helm repo index "$env:PAGES_DIR" --url $env:HELM_REPO_URL
 
             git add $env:PAGES_DIR
