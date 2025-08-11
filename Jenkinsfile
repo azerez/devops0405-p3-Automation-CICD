@@ -27,35 +27,33 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // Get short SHA via PowerShell and keep ONLY the last line
+          // short SHA – via PowerShell, לוקחים רק את השורה האחרונה
           def out = powershell(returnStdout: true, script: '(git rev-parse --short HEAD) | Select-Object -Last 1')
           env.GIT_SHA = out.trim()
 
           def chartPath = "${HELM_DIR}/Chart.yaml"
           def valsPath  = "${HELM_DIR}/values.yaml"
-          def chartText = readFile(chartPath)
-          def lines     = chartText.readLines()
+          def lines     = readFile(chartPath).readLines()
 
-          // bump version: x.y.z -> x.y.(z+1)
+          // bump x.y.z -> x.y.(z+1)
           int verIdx = lines.findIndexOf { it.trim().startsWith('version:') }
           if (verIdx < 0) { error("version: not found in ${chartPath}") }
           def verStr = lines[verIdx].split(':', 2)[1].trim()
           def parts  = verStr.tokenize('.')
-          if (parts.size() < 3) { error("invalid SemVer in ${chartPath}: ${verStr}") }
           int major = parts[0] as int
           int minor = parts[1] as int
           int patch = (parts[2] as int) + 1
           def newVer = "${major}.${minor}.${patch}"
           lines[verIdx] = "version: ${newVer}"
 
-          // set/append appVersion to current git sha
+          // appVersion -> SHA
           int appIdx = lines.findIndexOf { it.trim().startsWith('appVersion:') }
-          if (appIdx >= 0) { lines[appIdx] = "appVersion: ${env.GIT_SHA}" }
-          else { lines += "appVersion: ${env.GIT_SHA}" }
+          if (appIdx >= 0) lines[appIdx] = "appVersion: ${env.GIT_SHA}"
+          else lines += "appVersion: ${env.GIT_SHA}"
 
           writeFile file: chartPath, text: lines.join("\n")
 
-          // update image tag in values.yaml if present
+          // values.yaml tag (אם קיים)
           if (fileExists(valsPath)) {
             def vLines = readFile(valsPath).readLines()
             int tagIdx = vLines.findIndexOf { it.trim().startsWith('tag:') }
@@ -86,34 +84,41 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GHTOKEN')]) {
-          powershell '''
-            $ErrorActionPreference = "Stop"
-            $CURR = (git rev-parse --abbrev-ref HEAD).Trim()
+          bat """
+          @echo off
+          setlocal enabledelayedexpansion
 
-            git config user.email "$env:GIT_EMAIL"
-            git config user.name  "$env:GIT_NAME"
+          for /f "delims=" %%i in ('git rev-parse --abbrev-ref HEAD') do set CURR=%%i
 
-            git fetch origin gh-pages 2>$null
-            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
-              git checkout --orphan gh-pages
-              git rm -rf . 2>$null
-            } else {
-              git checkout gh-pages
-            }
+          git config user.email "%GIT_EMAIL%"
+          git config user.name  "%GIT_NAME%"
 
-            New-Item -ItemType Directory "$env:PAGES_DIR" -Force | Out-Null
-            New-Item -ItemType File "$env:PAGES_DIR/.nojekyll" -Force | Out-Null
-            Move-Item ".release\\*.tgz" "$env:PAGES_DIR\\" -Force
+          rem fetch (התעלמות פלט שגיאה לא מזיק של git)
+          git fetch origin gh-pages 2>nul
 
-            helm repo index "$env:PAGES_DIR" --url $env:HELM_REPO_URL
+          rem אם אין לנו סניף gh-pages מקומי – צור orphan
+          git show-ref --verify --quiet refs/heads/gh-pages
+          if errorlevel 1 (
+            git checkout --orphan gh-pages
+            git rm -rf . 2>nul
+          ) else (
+            git checkout gh-pages
+          )
 
-            git add $env:PAGES_DIR
-            git commit -m "publish chart $env:APP_NAME $env:GIT_SHA" 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "Nothing to commit"; }
+          if not exist "%PAGES_DIR%" mkdir "%PAGES_DIR%"
+          if not exist "%PAGES_DIR%\\.nojekyll" type nul > "%PAGES_DIR%\\.nojekyll"
 
-            git push "https://$env:GHTOKEN@github.com/$env:REPO_SLUG.git" gh-pages
+          move /y ".release\\*.tgz" "%PAGES_DIR%\\"
 
-            git checkout $CURR
-          '''
+          helm repo index "%PAGES_DIR%" --url %HELM_REPO_URL%
+
+          git add "%PAGES_DIR%"
+          git commit -m "publish chart %APP_NAME% %GIT_SHA%" || echo Nothing to commit
+          git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages
+
+          git checkout "!CURR!"
+          endlocal
+          """
         }
       }
     }
