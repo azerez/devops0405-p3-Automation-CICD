@@ -93,10 +93,13 @@ pipeline {
           git config user.email "%GIT_EMAIL%"
           git config user.name  "%GIT_NAME%"
 
-          rem fetch remote gh-pages info
+          rem update remote info
           git fetch origin gh-pages 2>nul
 
-          rem Base local gh-pages on origin/gh-pages if exists; else create orphan
+          rem ensure clean working tree before switching
+          git reset --hard
+
+          rem base local gh-pages on origin/gh-pages if exists; else create orphan
           git rev-parse --verify origin/gh-pages >nul 2>&1
           if errorlevel 1 (
             echo No remote gh-pages found -> creating orphan
@@ -117,7 +120,11 @@ pipeline {
           git add "%PAGES_DIR%"
           git commit -m "publish chart %APP_NAME% %GIT_SHA%" || echo Nothing to commit
 
-          git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages
+          rem push; on reject, rebase & push again
+          git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages || (
+            git pull --rebase https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages && ^
+            git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages
+          )
           if errorlevel 1 (
             echo Push failed. Aborting.
             exit /b 1
