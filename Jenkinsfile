@@ -27,36 +27,40 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // Short commit SHA for traceability
+          // current commit short SHA
           env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
 
           def chartPath = "${HELM_DIR}/Chart.yaml"
           def valsPath  = "${HELM_DIR}/values.yaml"
-          def chart     = readFile(chartPath)
+          def chartText = readFile(chartPath)
+          def lines     = chartText.readLines()
 
-          // bump version: x.y.z -> x.y.(z+1)
-          def m = (chart =~ /(?m)^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
-          if (!m.find()) { error("version: not found in ${chartPath}") }
-          int major = m.group(1) as int
-          int minor = m.group(2) as int
-          int patch = (m.group(3) as int) + 1
+          // --- bump version: x.y.z -> x.y.(z+1) (no regex matcher kept) ---
+          int verIdx = lines.findIndexOf { it.trim().startsWith('version:') }
+          if (verIdx < 0) { error("version: not found in ${chartPath}") }
+          def verStr = lines[verIdx].split(':', 2)[1].trim()   // after "version:"
+          def parts  = verStr.tokenize('.')
+          if (parts.size() < 3) { error("invalid SemVer in ${chartPath}: ${verStr}") }
+          int major = parts[0] as int
+          int minor = parts[1] as int
+          int patch = (parts[2] as int) + 1
           def newVer = "${major}.${minor}.${patch}"
-          chart = chart.replaceFirst(/(?m)^\s*version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVer}")
+          lines[verIdx] = "version: ${newVer}"
 
-          // set/append appVersion to current git sha
-          if ((chart =~ /(?m)^\s*appVersion:/).find()) {
-            chart = chart.replaceFirst(/(?m)^\s*appVersion:\s*.*/, "appVersion: ${env.GIT_SHA}")
-          } else {
-            chart = chart + "\nappVersion: ${env.GIT_SHA}\n"
-          }
-          writeFile(file: chartPath, text: chart)
+          // --- set/append appVersion to current git sha ---
+          int appIdx = lines.findIndexOf { it.trim().startsWith('appVersion:') }
+          if (appIdx >= 0) { lines[appIdx] = "appVersion: ${env.GIT_SHA}" }
+          else { lines += "appVersion: ${env.GIT_SHA}" }
 
-          // update image tag in values.yaml if 'tag:' exists
+          writeFile file: chartPath, text: lines.join("\n")
+
+          // --- update image tag in values.yaml if 'tag:' line exists ---
           if (fileExists(valsPath)) {
-            def vals = readFile(valsPath)
-            if ((vals =~ /(?m)^\s*tag:\s*/).find()) {
-              vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: \"${env.GIT_SHA}\"")
-              writeFile(file: valsPath, text: vals)
+            def vLines = readFile(valsPath).readLines()
+            int tagIdx = vLines.findIndexOf { it.trim().startsWith('tag:') }
+            if (tagIdx >= 0) {
+              vLines[tagIdx] = '  tag: "' + env.GIT_SHA + '"'
+              writeFile file: valsPath, text: vLines.join("\n")
             }
           }
 
@@ -72,7 +76,6 @@ pipeline {
           $ErrorActionPreference = "Stop"
           if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
           New-Item -ItemType Directory ".release" | Out-Null
-          # Create the package directly into .release (no move needed)
           helm package $env:HELM_DIR --destination .release
         '''
       }
@@ -90,7 +93,7 @@ pipeline {
             git config user.name  "$env:GIT_NAME"
 
             git fetch origin gh-pages 2>$null
-            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
+[O            if (-not (git show-ref --verify --quiet refs/heads/gh-pages)) {
               git checkout --orphan gh-pages
               git rm -rf . 2>$null
             } else {
