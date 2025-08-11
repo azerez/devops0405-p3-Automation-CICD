@@ -1,3 +1,40 @@
+/* ---------- pure Groovy helpers (outside the pipeline block) ---------- */
+@NonCPS
+String bumpChartYaml(String text, String sha) {
+  def lines = text.split(/\r?\n/, -1)
+  int verIdx = lines.findIndexOf { it ==~ /^\s*version:\s*\d+\.\d+\.\d+\s*$/ }
+  if (verIdx >= 0) {
+    def m = (lines[verIdx] =~ /(\d+)\.(\d+)\.(\d+)/)[0]
+    int patch = (m[3] as int) + 1
+    lines[verIdx] = "version: ${m[1]}.${m[2]}.${patch}"
+  }
+  int appIdx = lines.findIndexOf { it ==~ /^\s*appVersion:\s*.*/ }
+  if (appIdx >= 0) {
+    lines[appIdx] = "appVersion: ${sha}"
+  } else {
+    lines += "appVersion: ${sha}"
+  }
+  return lines.join('\n') + '\n'
+}
+
+@NonCPS
+String bumpValuesTag(String text, String sha) {
+  def lines = text.split(/\r?\n/, -1)
+  int idx = lines.findIndexOf { it ==~ /^\s*tag:\s*.*/ }
+  if (idx >= 0) {
+    lines[idx] = '  tag: "' + sha + '"'
+  } else {
+    int imageIdx = lines.findIndexOf { it ==~ /^\s*image:\s*$/ }
+    if (imageIdx >= 0) {
+      lines.add(imageIdx + 1, '  tag: "' + sha + '"')
+    } else {
+      lines += 'tag: "' + sha + '"'
+    }
+  }
+  return lines.join('\n') + '\n'
+}
+
+/* ------------------------------ pipeline ------------------------------ */
 pipeline {
   agent any
 
@@ -8,8 +45,7 @@ pipeline {
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
     REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
 
-    // Docker image to build & deploy
-    DOCKER_REPO   = 'erezazu/devops0405-docker-flask-app'
+    DOCKER_REPO   = 'erezazu/devops0405-docker-flask-app'  // image to build/deploy
 
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
@@ -17,52 +53,8 @@ pipeline {
 
   options { timestamps() }
 
-  /*
-   * Pure-Groovy helpers (no Jenkins steps inside).
-   * We avoid System.lineSeparator() to keep the sandbox happy.
-   */
-  @NonCPS
-  String bumpChartYaml(String text, String sha) {
-    // keep CRLF or LF by splitting on \r?\n, preserving empty trailing part
-    def lines = text.split(/\r?\n/, -1)
-    int verIdx = lines.findIndexOf { it ==~ /^\s*version:\s*\d+\.\d+\.\d+\s*$/ }
-    if (verIdx >= 0) {
-      def m = (lines[verIdx] =~ /(\d+)\.(\d+)\.(\d+)/)[0]
-      int patch = (m[3] as int) + 1
-      lines[verIdx] = "version: ${m[1]}.${m[2]}.${patch}"
-    }
-    int appIdx = lines.findIndexOf { it ==~ /^\s*appVersion:\s*.*/ }
-    if (appIdx >= 0) {
-      lines[appIdx] = "appVersion: ${sha}"
-    } else {
-      lines += "appVersion: ${sha}"
-    }
-    return lines.join('\n') + '\n'
-  }
-
-  @NonCPS
-  String bumpValuesTag(String text, String sha) {
-    def lines = text.split(/\r?\n/, -1)
-    int idx = lines.findIndexOf { it ==~ /^\s*tag:\s*.*/ }
-    if (idx >= 0) {
-      lines[idx] = '  tag: "' + sha + '"'
-    } else {
-      // try to add under image: block; if not found, just append under root
-      int imageIdx = lines.findIndexOf { it ==~ /^\s*image:\s*$/ }
-      if (imageIdx >= 0) {
-        lines.add(imageIdx + 1, '  tag: "' + sha + '"')
-      } else {
-        lines += 'tag: "' + sha + '"'
-      }
-    }
-    return lines.join('\n') + '\n'
-  }
-
   stages {
-
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Init (capture SHA)') {
       steps {
@@ -75,29 +67,22 @@ pipeline {
 
     stage('Helm Lint') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
-      steps {
-        powershell 'helm lint ${env:HELM_DIR}'
-      }
+      steps { powershell 'helm lint ${env:HELM_DIR}' }
     }
 
     stage('Bump Chart Version (patch)') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // Chart.yaml
-          def chartPath = "${env.HELM_DIR}/Chart.yaml"
-          def chartText = readFile(chartPath)
-          def newChart = bumpChartYaml(chartText, env.GIT_SHA)
-          writeFile file: chartPath, text: newChart
+          def chartPath  = "${env.HELM_DIR}/Chart.yaml"
+          def chartText  = readFile(chartPath)
+          writeFile file: chartPath, text: bumpChartYaml(chartText, env.GIT_SHA)
 
-          // values.yaml (image tag)
           def valuesPath = "${env.HELM_DIR}/values.yaml"
           if (fileExists(valuesPath)) {
             def valuesText = readFile(valuesPath)
-            def newValues = bumpValuesTag(valuesText, env.GIT_SHA)
-            writeFile file: valuesPath, text: newValues
+            writeFile file: valuesPath, text: bumpValuesTag(valuesText, env.GIT_SHA)
           }
-
           echo "Bumped chart; appVersion/tag -> ${env.GIT_SHA}"
         }
       }
@@ -132,7 +117,6 @@ pipeline {
               git checkout -B gh-pages origin/gh-pages
               git reset --hard origin/gh-pages
             )
-
             if not exist ${PAGES_DIR} mkdir ${PAGES_DIR}
             type nul > ${PAGES_DIR}\\.nojekyll
           """
