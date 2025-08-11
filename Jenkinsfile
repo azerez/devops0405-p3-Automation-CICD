@@ -26,44 +26,42 @@ pipeline {
     stage('Bump Chart Version (patch)') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
-        script { env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim() }
-        powershell '''
-          $ErrorActionPreference = "Stop"
-          $CHART = "$env:HELM_DIR/Chart.yaml"
-          $VALS  = "$env:HELM_DIR/values.yaml"
+        script {
+          // Short commit SHA for traceability
+          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
 
-          # Read and bump SemVer patch in Chart.yaml
-          $content = Get-Content $CHART
-          $m = Select-String -InputObject $content -Pattern "^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)\s*$"
-          if (-not $m) { throw "version: not found in Chart.yaml" }
-          $i = $m.LineNumber - 1
-          $major = [int]$m.Matches[0].Groups[1].Value
-          $minor = [int]$m.Matches[0].Groups[2].Value
-          $patch = ([int]$m.Matches[0].Groups[3].Value) + 1
-          $newVer = "$major.$minor.$patch"
-          $content[$i] = "version: $newVer"
+          def chartPath = "${HELM_DIR}/Chart.yaml"
+          def valsPath  = "${HELM_DIR}/values.yaml"
+          def chart     = readFile(chartPath)
 
-          # Set/append appVersion to current git sha
-          $mApp = Select-String -InputObject $content -Pattern "^\s*appVersion:\s*"
-          if ($mApp) {
-            $content[$mApp.LineNumber[0]-1] = "appVersion: ${env:GIT_SHA}"
+          // bump version: x.y.z -> x.y.(z+1)
+          def m = (chart =~ /(?m)^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
+          if (!m.find()) { error("version: not found in ${chartPath}") }
+          int major = m.group(1) as int
+          int minor = m.group(2) as int
+          int patch = (m.group(3) as int) + 1
+          def newVer = "${major}.${minor}.${patch}"
+          chart = chart.replaceFirst(/(?m)^\s*version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVer}")
+
+          // set/append appVersion to current git sha
+          if ((chart =~ /(?m)^\s*appVersion:/).find()) {
+            chart = chart.replaceFirst(/(?m)^\s*appVersion:\s*.*/, "appVersion: ${env.GIT_SHA}")
           } else {
-            $content += "appVersion: ${env:GIT_SHA}"
+            chart = chart + "\nappVersion: ${env.GIT_SHA}\n"
           }
-          Set-Content -NoNewline -Path $CHART -Value ($content -join "`n")
+          writeFile(file: chartPath, text: chart)
 
-          # Update image tag in values.yaml if a 'tag:' key exists
-          if (Test-Path $VALS) {
-            $vals = Get-Content $VALS
-            $mTag = Select-String -InputObject $vals -Pattern "^\s*tag:\s*"
-            if ($mTag) {
-              $vals[$mTag.LineNumber[0]-1] = "  tag: `"${env:GIT_SHA}`""
-              Set-Content -NoNewline -Path $VALS -Value ($vals -join "`n")
+          // update image tag in values.yaml if 'tag:' exists
+          if (fileExists(valsPath)) {
+            def vals = readFile(valsPath)
+            if ((vals =~ /(?m)^\s*tag:\s*/).find()) {
+              vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: \"${env.GIT_SHA}\"")
+              writeFile(file: valsPath, text: vals)
             }
           }
 
-          Write-Host "Bumped chart version to $newVer ; image tag -> ${env:GIT_SHA}"
-        '''
+          echo "Bumped chart version to ${newVer}; image tag -> ${env.GIT_SHA}"
+        }
       }
     }
 
@@ -101,7 +99,6 @@ pipeline {
 
             New-Item -ItemType Directory "$env:PAGES_DIR" -Force | Out-Null
             New-Item -ItemType File "$env:PAGES_DIR/.nojekyll" -Force | Out-Null
-
             Move-Item ".release\\*.tgz" "$env:PAGES_DIR\\" -Force
 
             helm repo index "$env:PAGES_DIR" --url $env:HELM_REPO_URL
