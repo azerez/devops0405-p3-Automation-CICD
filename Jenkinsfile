@@ -1,87 +1,50 @@
-// ---------- Helpers ----------
-@NonCPS
-String bumpChartYaml(String text, String sha) {
-  List<String> lines = (text.split(/\r?\n/, -1) as List<String>)
-
-  // bump X.Y.Z -> X.Y.(Z+1)
-  int verIdx = lines.findIndexOf { it ==~ /^\s*version:\s*\d+\.\d+\.\d+\s*$/ }
-  if (verIdx >= 0) {
-    def m = (lines[verIdx] =~ /(\d+)\.(\d+)\.(\d+)/)[0]
-    int patch = (m[3] as int) + 1
-    lines[verIdx] = ("version: ${m[1]}.${m[2]}.${patch}").toString()
-  }
-
-  // set appVersion (quoted)
-  int appIdx = lines.findIndexOf { it ==~ /^\s*appVersion:\s*.*/ }
-  if (appIdx >= 0) {
-    lines[appIdx] = ("appVersion: \"${sha}\"").toString()
-  } else {
-    lines.add(("appVersion: \"${sha}\"").toString())
-  }
-  return lines.join('\n') + '\n'
-}
-
-@NonCPS
-String bumpValuesTag(String text, String sha) {
-  List<String> lines = (text.split(/\r?\n/, -1) as List<String>)
-  int tagIdx = lines.findIndexOf { it ==~ /^\s*tag:\s*.*/ }
-  if (tagIdx >= 0) {
-    lines[tagIdx] = ('  tag: "' + sha + '"') as String
-  } else {
-    int imageIdx = lines.findIndexOf { it ==~ /^\s*image:\s*$/ }
-    if (imageIdx >= 0) {
-      lines.add(imageIdx + 1, ('  tag: "' + sha + '"') as String)
-    } else {
-      lines.add(('tag: "' + sha + '"') as String)
-    }
-  }
-  return lines.join('\n') + '\n'
-}
-
-// ---------------------- Pipeline ----------------------
 pipeline {
   agent any
-  options { timestamps(); skipDefaultCheckout(true) }
+  options { skipDefaultCheckout(true) }
 
   environment {
-    CHART_DIR    = 'helm/flaskapp'
-    RELEASE_DIR  = '.release'
+    CHART_DIR   = 'helm/flaskapp'
+    CHART_NAME  = 'flaskapp'
+    RELEASE_DIR = '.release'
+
+    // Docker image to build & push
     DOCKER_IMAGE = 'erezazu/devops0405-docker-flask-app'
+
+    // GitHub repo & pages
+    REPO_URL     = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
+    PAGES_URL    = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
   }
 
   stages {
-    stage('Checkout SCM') { steps { checkout scm } }
+    stage('Checkout SCM') {
+      steps { checkout scm }
+    }
 
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Return ONLY the SHA (no שורת פקודה)
-          env.GIT_SHA = powershell(returnStdout: true, script: '(git rev-parse --short HEAD).Trim()').trim()
+          // Short git SHA for tagging chart + image
+          env.GIT_SHA = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
       }
     }
 
     stage('Helm Lint') {
-      steps { powershell 'helm lint ${env:CHART_DIR}' }
+      steps {
+        powershell """
+          helm lint ${env.CHART_DIR}
+        """
+      }
     }
 
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          def chartPath  = "${env.CHART_DIR}/Chart.yaml"
-          def valuesPath = "${env.CHART_DIR}/values.yaml"
-
-          def chartTxt   = readFile(chartPath)
-          def valuesTxt  = readFile(valuesPath)
-
-          def newChart   = bumpChartYaml(chartTxt,  env.GIT_SHA)
-          def newValues  = bumpValuesTag(valuesTxt, env.GIT_SHA)
-
-          writeFile(file: chartPath,  text: newChart)
-          writeFile(file: valuesPath, text: newValues)
-
-          echo "Chart and values updated for ${env.GIT_SHA}"
+          bumpChartYaml("${env.CHART_DIR}/Chart.yaml",
+                        "${env.CHART_DIR}/values.yaml",
+                        env.GIT_SHA,
+                        env.DOCKER_IMAGE)
         }
       }
     }
@@ -89,57 +52,43 @@ pipeline {
     stage('Package Chart') {
       steps {
         powershell """
-          New-Item -ItemType Directory -Force -Path '${env:RELEASE_DIR}' | Out-Null
-          helm package '${env:CHART_DIR}' -d '${env:RELEASE_DIR}'
+          mkdir ${env.RELEASE_DIR} 2>$null | Out-Null
+          helm package ${env.CHART_DIR} -d ${env.RELEASE_DIR}
         """
       }
     }
 
     stage('Publish to gh-pages') {
       steps {
-        withCredentials([string(credentialsId: 'GHTOKEN', variable: 'GHTOKEN')]) {
-          script {
-            env.REMOTE_URL = "https://${GHTOKEN}@github.com/azerez/devops0405-p3-Automation-CICD.git"
-          }
-          bat '''
-            if exist ghp ( rmdir /s /q ghp )
-            git worktree prune
-            git fetch origin gh-pages
-            git worktree add ghp gh-pages
-          '''
-          powershell '''
-            $pkg = Get-ChildItem -Path "${env:RELEASE_DIR}" -Filter "*.tgz" | Select-Object -First 1
-            New-Item -ItemType Directory -Force -Path "ghp/docs" | Out-Null
-            Copy-Item $pkg.FullName -Destination "ghp/docs/"
-            if (Test-Path "ghp/docs/.nojekyll") { } else { Set-Content -Path "ghp/docs/.nojekyll" -Value "" -NoNewline }
-            if (Test-Path "ghp/docs/index.yaml") {
-              helm repo index "ghp/docs" --merge "ghp/docs/index.yaml"
-            } else {
-              helm repo index "ghp/docs"
-            }
-          '''
-          bat '''
-            cd ghp
-            git config user.email "ci@example.com"
-            git config user.name  "jenkins-ci"
+        withCredentials([string(credentialsId: 'github-token', variable: 'GHTOKEN')]) {
+          bat """
+            git fetch origin gh-pages 2>NUL || ver > NUL
+            git checkout -B gh-pages
+            mkdir docs 2>NUL || ver > NUL
+            move /Y ${env.RELEASE_DIR}\\*.tgz docs\\
+          """
+          // regenerate index.yaml
+          powershell """
+            helm repo index docs --url ${env.PAGES_URL}
+          """
+          bat """
             git add docs
-            git commit -m "publish chart flaskapp %GIT_SHA%" || echo Nothing to commit
-            git push %REMOTE_URL% HEAD:gh-pages
-          '''
+            git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart ${env.GIT_SHA}" || ver > NUL
+            git -c http.extraheader="AUTHORIZATION: bearer %GHTOKEN%" push ${env.REPO_URL} HEAD:gh-pages --force
+          """
         }
       }
     }
 
     stage('Build & Push Docker') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'DOCKERHUB',
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds',
                                           usernameVariable: 'DOCKER_USER',
                                           passwordVariable: 'DOCKER_PASS')]) {
-          powershell """
-            docker login -u $env:DOCKER_USER -p $env:DOCKER_PASS
-            docker build -t ${env:DOCKER_IMAGE}:${env:GIT_SHA} -t ${env:DOCKER_IMAGE}:latest App
-            docker push  ${env:DOCKER_IMAGE}:${env:GIT_SHA}
-            docker push  ${env:DOCKER_IMAGE}:latest
+          bat """
+            docker login -u %DOCKER_USER% -p %DOCKER_PASS%
+            docker build -t ${env.DOCKER_IMAGE}:${env.GIT_SHA} App
+            docker push ${env.DOCKER_IMAGE}:${env.GIT_SHA}
           """
         }
       }
@@ -147,16 +96,72 @@ pipeline {
 
     stage('Deploy to minikube') {
       steps {
-        powershell """
-          helm upgrade --install flaskapp '${env:CHART_DIR}' `
-            --set image.repository='${env:DOCKER_IMAGE}' `
-            --set image.tag='${env:GIT_SHA}' `
-            --namespace default --create-namespace
-        """
+        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECFG')]) {
+          withEnv(["KUBECONFIG=${KUBECFG}"]) {
+            powershell """
+              helm upgrade --install ${env.CHART_NAME} ${env.CHART_DIR} `
+                --set image.repository=${env.DOCKER_IMAGE} `
+                --set image.tag='${env.GIT_SHA}'
+            """
+          }
+        }
       }
     }
   }
 
-  post { always { cleanWs() } }
+  post {
+    always {
+      stage('Declarative: Post Actions') {
+        cleanWs()
+      }
+    }
+  }
+}
+
+/**
+ * Safely bump Chart.yaml (patch) + set appVersion=GIT_SHA
+ * and make sure values.yaml contains the right repo and an empty tag.
+ * Avoids non-serializable objects (no Matchers kept) and preserves valid YAML.
+ */
+def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String dockerImage) {
+  // ---- Chart.yaml ----
+  String chart = readFile(chartFile)
+  List<String> out = []
+  boolean bumped = false
+  boolean appSet = false
+
+  chart.readLines().each { ln ->
+    if (!bumped && ln.trim() ==~ /version:\s*\d+\.\d+\.\d+.*/) {
+      def nums   = ln.replaceFirst(/.*version:\s*/, '').trim()
+      def parts  = nums.tokenize('.')
+      int patch  = (parts[2] as int) + 1
+      out << "version: ${parts[0]}.${parts[1]}.${patch}"
+      bumped = true
+    } else if (!appSet && ln.trim().startsWith('appVersion:')) {
+      out << "appVersion: \"${gitSha}\""
+      appSet = true
+    } else {
+      out << ln
+    }
+  }
+  if (!appSet) { out << "appVersion: \"${gitSha}\"" }
+  writeFile file: chartFile, text: out.join('\n') + '\n'
+
+  // ---- values.yaml ----
+  String vals = readFile(valuesFile)
+  List<String> vout = []
+  vals.readLines().each { ln ->
+    if (ln.trim().startsWith('repository:')) {
+      // keep basic two-space indent that already exists in file
+      vout << "  repository: ${dockerImage}"
+    } else if (ln.trim().startsWith('tag:')) {
+      vout << '  tag: ""'
+    } else {
+      vout << ln
+    }
+  }
+  writeFile file: valuesFile, text: vout.join('\n') + '\n'
+
+  echo "Chart and values updated for ${gitSha}"
 }
 
