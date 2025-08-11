@@ -12,7 +12,7 @@ replicaCount: 1
 image:
   repository: erezazu/devops0405-docker-flask-app
   pullPolicy: IfNotPresent
-  tag: "v1"
+  tag: ""
 
 # Secrets for pulling an image from a private registry
 imagePullSecrets: []

@@ -2,68 +2,76 @@ pipeline {
   agent any
 
   environment {
+    // --- App/Helm/GitHub ---
     APP_NAME      = 'flaskapp'
     HELM_DIR      = 'helm/flaskapp'
     PAGES_DIR     = 'docs'
-    HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
-    REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'   // owner/repo
+    HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'  // בלי /docs
+    REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
+
+    // --- Docker image (חייב להיות זהה לערך ב-values.yaml) ---
+    DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
   }
 
   options { timestamps() }
 
   stages {
+
     stage('Checkout') {
       steps { checkout scm }
     }
 
+    stage('Init (capture SHA)') {
+      steps {
+        script {
+          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+          echo "GIT_SHA = ${env.GIT_SHA}"
+        }
+      }
+    }
+
     stage('Helm Lint') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
-      steps { powershell 'helm lint $env:HELM_DIR' }
+      steps {
+        powershell "helm lint ${env.HELM_DIR}"
+      }
     }
 
     stage('Bump Chart Version (patch)') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // short SHA via PowerShell (last line only)
-          def out = powershell(returnStdout: true, script: '(git rev-parse --short HEAD) | Select-Object -Last 1')
-          env.GIT_SHA = out.trim()
-
+          // bump version: x.y.(z+1)
           def chartPath = "${HELM_DIR}/Chart.yaml"
-          def valsPath  = "${HELM_DIR}/values.yaml"
-          def lines     = readFile(chartPath).readLines()
-
-          // bump x.y.z -> x.y.(z+1)
-          int verIdx = lines.findIndexOf { it.trim().startsWith('version:') }
-          if (verIdx < 0) { error("version: not found in ${chartPath}") }
-          def verStr = lines[verIdx].split(':', 2)[1].trim()
-          def parts  = verStr.tokenize('.')
-          int major = parts[0] as int
-          int minor = parts[1] as int
-          int patch = (parts[2] as int) + 1
+          def chart = readFile(chartPath)
+          def m = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
+          if (!m.find()) { error "version: not found in ${chartPath}" }
+          def major = m.group(1) as int
+          def minor = m.group(2) as int
+          def patch = (m.group(3) as int) + 1
           def newVer = "${major}.${minor}.${patch}"
-          lines[verIdx] = "version: ${newVer}"
 
-          // appVersion -> current SHA
-          int appIdx = lines.findIndexOf { it.trim().startsWith('appVersion:') }
-          if (appIdx >= 0) lines[appIdx] = "appVersion: ${env.GIT_SHA}"
-          else lines += "appVersion: ${env.GIT_SHA}"
+          chart = chart.replaceFirst(/(?m)^version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVer}")
 
-          writeFile file: chartPath, text: lines.join("\n")
+          if (chart =~ /(?m)^appVersion:/) {
+            chart = chart.replaceFirst(/(?m)^appVersion:\s*.*/, "appVersion: ${env.GIT_SHA}")
+          } else {
+            chart += "\nappVersion: ${env.GIT_SHA}\n"
+          }
+          writeFile file: chartPath, text: chart
 
-          // update image tag in values.yaml if present
+          // optionally refresh values.yaml tag (pipeline ידרוס ב--set, אבל נחמד לסנכרן)
+          def valsPath = "${HELM_DIR}/values.yaml"
           if (fileExists(valsPath)) {
-            def vLines = readFile(valsPath).readLines()
-            int tagIdx = vLines.findIndexOf { it.trim().startsWith('tag:') }
-            if (tagIdx >= 0) {
-              vLines[tagIdx] = '  tag: "' + env.GIT_SHA + '"'
-              writeFile file: valsPath, text: vLines.join("\n")
+            def vals = readFile(valsPath)
+            if (vals =~ /(?m)^\s*tag:/) {
+              vals = vals.replaceFirst(/(?m)^\s*tag:.*$/, "  tag: \"${env.GIT_SHA}\"")
+              writeFile file: valsPath, text: vals
             }
           }
-
-          echo "Bumped chart version to ${newVer}; image tag -> ${env.GIT_SHA}"
+          echo "Bumped chart to ${newVer}; appVersion/tag -> ${env.GIT_SHA}"
         }
       }
     }
@@ -75,7 +83,8 @@ pipeline {
           $ErrorActionPreference = "Stop"
           if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
           New-Item -ItemType Directory ".release" | Out-Null
-          helm package $env:HELM_DIR --destination .release
+          helm package ${env:HELM_DIR}
+          Move-Item "${env:HELM_DIR}\\${env:APP_NAME}-*.tgz" ".release\\" -Force
         '''
       }
     }
@@ -88,50 +97,75 @@ pipeline {
           @echo off
           setlocal enabledelayedexpansion
 
-          for /f "delims=" %%i in ('git rev-parse --abbrev-ref HEAD') do set CURR=%%i
+          git config user.email "${GIT_EMAIL}"
+          git config user.name  "${GIT_NAME}"
 
-          git config user.email "%GIT_EMAIL%"
-          git config user.name  "%GIT_NAME%"
+          rem fetch remote gh-pages and base on it (avoid non-fast-forward)
+          git fetch origin gh-pages
 
-          rem update remote info
-          git fetch origin gh-pages 2>nul
+          for /f %%A in ('git rev-parse --verify --quiet remotes/origin/gh-pages') do set HAS_GHPAGES=1
 
-          rem ensure clean working tree before switching
-          git reset --hard
-
-          rem base local gh-pages on origin/gh-pages if exists; else create orphan
-          git rev-parse --verify origin/gh-pages >nul 2>&1
-          if errorlevel 1 (
-            echo No remote gh-pages found -> creating orphan
-            git checkout --orphan gh-pages
-            git rm -rf . 2>nul
-          ) else (
+          if defined HAS_GHPAGES (
             echo Using remote origin/gh-pages as base
             git checkout -B gh-pages origin/gh-pages
+            git pull --rebase origin gh-pages
+          ) else (
+            echo Creating orphan gh-pages
+            git checkout --orphan gh-pages
+            git rm -rf .
           )
 
-          if not exist "%PAGES_DIR%" mkdir "%PAGES_DIR%"
-          if not exist "%PAGES_DIR%\\.nojekyll" type nul > "%PAGES_DIR%\\.nojekyll"
+          if not exist ${PAGES_DIR} mkdir ${PAGES_DIR}
+          if not exist ${PAGES_DIR}\\.nojekyll echo.> ${PAGES_DIR}\\.nojekyll
 
-          move /y ".release\\*.tgz" "%PAGES_DIR%\\"
+          move /Y .release\\*.tgz ${PAGES_DIR}\\
 
-          helm repo index "%PAGES_DIR%" --url %HELM_REPO_URL%
+          helm repo index ${PAGES_DIR} --url ${HELM_REPO_URL}
 
-          git add "%PAGES_DIR%"
-          git commit -m "publish chart %APP_NAME% %GIT_SHA%" || echo Nothing to commit
+          git add ${PAGES_DIR}
+          git commit -m "publish chart ${APP_NAME} ${GIT_SHA}" || echo Nothing to commit
 
-          rem push; on reject, rebase & push again
-          git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages || (
-            git pull --rebase https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages && ^
-            git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages
-          )
-          if errorlevel 1 (
-            echo Push failed. Aborting.
-            exit /b 1
-          )
+          git push https://${GHTOKEN}@github.com/${REPO_SLUG}.git gh-pages
 
-          git checkout "!CURR!"
+          git checkout - 1>nul 2>nul
           endlocal
+          """
+        }
+      }
+    }
+
+    stage('Build & Push Docker') {
+      when { changeset pattern: 'App/**', comparator: 'ANT' }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds',
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
+          bat """
+          @echo off
+          docker login -u %DOCKER_USER% -p %DOCKER_PASS%
+          docker build -t %DOCKER_IMAGE%:%GIT_SHA% -f App/Dockerfile App
+          docker push %DOCKER_IMAGE%:%GIT_SHA%
+          """
+        }
+      }
+    }
+
+    stage('Deploy to minikube') {
+      when { branch 'main' }
+      steps {
+        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+          bat """
+          @echo off
+          set KUBECONFIG=%KUBECONFIG_FILE%
+          kubectl config current-context
+
+          helm repo add flaskapp ${HELM_REPO_URL} --force-update
+          helm repo update
+
+          helm upgrade --install %APP_NAME% flaskapp/%APP_NAME% ^
+            --namespace default --create-namespace ^
+            --set image.repository=%DOCKER_IMAGE% ^
+            --set image.tag=%GIT_SHA%
           """
         }
       }
