@@ -1,42 +1,3 @@
-// ---------- helpers (avoid CPS serialization issues) ----------
-@NonCPS
-String bumpPatch(String ver) {
-  // e.g., "0.1.0" -> "0.1.1"
-  def p = ver.trim().split('\\.')
-  return "${p[0]}.${p[1]}.${(p[2] as int) + 1}"
-}
-
-@NonCPS
-String bumpChartYaml(String chartYaml, String sha) {
-  def out = []
-  boolean appSet = false
-  chartYaml.readLines().each { ln ->
-    def t = ln.trim()
-    if (t.startsWith('version:')) {
-      def cur = t.split(':',2)[1].trim()
-      out << "version: ${bumpPatch(cur)}"
-    } else if (t.startsWith('appVersion:')) {
-      out << "appVersion: \"${sha}\""
-      appSet = true
-    } else {
-      out << ln
-    }
-  }
-  if (!appSet) out << "appVersion: \"${sha}\""
-  return out.join(System.lineSeparator())
-}
-
-@NonCPS
-String upsertImageTag(String valuesYaml, String sha) {
-  def m = (valuesYaml =~ /(?m)^\s*tag:/)
-  if (m.find()) {
-    return valuesYaml.replaceFirst(/(?m)^\s*tag:.*/, "  tag: \"${sha}\"")
-  }
-  return valuesYaml + System.lineSeparator() + "image:" +
-         System.lineSeparator() + "  tag: \"${sha}\"" + System.lineSeparator()
-}
-
-// ------------------------ Pipeline ----------------------------
 pipeline {
   agent any
 
@@ -47,8 +8,8 @@ pipeline {
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
     REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
 
-    // Docker image target (must match values.yaml)
-    DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
+    // Docker image to build & deploy
+    DOCKER_REPO   = 'erezazu/devops0405-docker-flask-app'
 
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
@@ -56,50 +17,88 @@ pipeline {
 
   options { timestamps() }
 
+  /*
+   * Pure-Groovy helpers (no Jenkins steps inside).
+   * We avoid System.lineSeparator() to keep the sandbox happy.
+   */
+  @NonCPS
+  String bumpChartYaml(String text, String sha) {
+    // keep CRLF or LF by splitting on \r?\n, preserving empty trailing part
+    def lines = text.split(/\r?\n/, -1)
+    int verIdx = lines.findIndexOf { it ==~ /^\s*version:\s*\d+\.\d+\.\d+\s*$/ }
+    if (verIdx >= 0) {
+      def m = (lines[verIdx] =~ /(\d+)\.(\d+)\.(\d+)/)[0]
+      int patch = (m[3] as int) + 1
+      lines[verIdx] = "version: ${m[1]}.${m[2]}.${patch}"
+    }
+    int appIdx = lines.findIndexOf { it ==~ /^\s*appVersion:\s*.*/ }
+    if (appIdx >= 0) {
+      lines[appIdx] = "appVersion: ${sha}"
+    } else {
+      lines += "appVersion: ${sha}"
+    }
+    return lines.join('\n') + '\n'
+  }
+
+  @NonCPS
+  String bumpValuesTag(String text, String sha) {
+    def lines = text.split(/\r?\n/, -1)
+    int idx = lines.findIndexOf { it ==~ /^\s*tag:\s*.*/ }
+    if (idx >= 0) {
+      lines[idx] = '  tag: "' + sha + '"'
+    } else {
+      // try to add under image: block; if not found, just append under root
+      int imageIdx = lines.findIndexOf { it ==~ /^\s*image:\s*$/ }
+      if (imageIdx >= 0) {
+        lines.add(imageIdx + 1, '  tag: "' + sha + '"')
+      } else {
+        lines += 'tag: "' + sha + '"'
+      }
+    }
+    return lines.join('\n') + '\n'
+  }
+
   stages {
-    stage('Checkout SCM') {
+
+    stage('Checkout') {
       steps { checkout scm }
     }
-
-    stage('Checkout') { steps { checkout scm } }
 
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Capture a clean short SHA (PowerShell trims the newline)
-          env.GIT_SHA = powershell(returnStdout: true,
-                                   script: '(git rev-parse --short HEAD).Trim()').trim()
+          env.GIT_SHA = bat(returnStdout: true, script: 'git rev-parse --short HEAD').trim()
+          echo "GIT_SHA = ${env.GIT_SHA}"
         }
-        echo "GIT_SHA = ${env.GIT_SHA}"
       }
     }
 
     stage('Helm Lint') {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
-      steps { powershell "helm lint ${env.HELM_DIR}" }
+      steps {
+        powershell 'helm lint ${env:HELM_DIR}'
+      }
     }
 
     stage('Bump Chart Version (patch)') {
-      when {
-        anyOf {
-          changeset pattern: 'helm/**', comparator: 'ANT'
-          changeset pattern: 'App/**',  comparator: 'ANT'
-        }
-      }
+      when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          def chartPath = "${HELM_DIR}/Chart.yaml"
-          def valsPath  = "${HELM_DIR}/values.yaml"
-          def chartIn   = readFile(chartPath)
-          def valsIn    = fileExists(valsPath) ? readFile(valsPath) : ""
+          // Chart.yaml
+          def chartPath = "${env.HELM_DIR}/Chart.yaml"
+          def chartText = readFile(chartPath)
+          def newChart = bumpChartYaml(chartText, env.GIT_SHA)
+          writeFile file: chartPath, text: newChart
 
-          def chartOut  = bumpChartYaml(chartIn, env.GIT_SHA)
-          def valsOut   = upsertImageTag(valsIn, env.GIT_SHA)
+          // values.yaml (image tag)
+          def valuesPath = "${env.HELM_DIR}/values.yaml"
+          if (fileExists(valuesPath)) {
+            def valuesText = readFile(valuesPath)
+            def newValues = bumpValuesTag(valuesText, env.GIT_SHA)
+            writeFile file: valuesPath, text: newValues
+          }
 
-          writeFile file: chartPath, text: chartOut
-          writeFile file: valsPath,  text: valsOut
-
-          echo "Bumped Chart.yaml & values.yaml -> tag/appVersion = ${env.GIT_SHA}"
+          echo "Bumped chart; appVersion/tag -> ${env.GIT_SHA}"
         }
       }
     }
@@ -111,8 +110,8 @@ pipeline {
           $ErrorActionPreference = "Stop"
           if (Test-Path ".release") { Remove-Item -Recurse -Force ".release" }
           New-Item -ItemType Directory ".release" | Out-Null
-          helm package $env:HELM_DIR
-          Move-Item "$env:HELM_DIR\\$env:APP_NAME-*.tgz" ".release\\" -Force
+          helm package ${env:HELM_DIR}
+          Move-Item "${env:HELM_DIR}\\${env:APP_NAME}-*.tgz" ".release\\" -Force
         '''
       }
     }
@@ -122,26 +121,31 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GHTOKEN')]) {
           bat """
-            setlocal enableextensions
-            for /f %%i in ('git rev-parse --abbrev-ref HEAD') do set CURR=%%i
+            git config user.email "${GIT_EMAIL}"
+            git config user.name  "${GIT_NAME}"
+            git fetch origin gh-pages 2>nul
+            for /f %%i in ('git rev-parse --verify --quiet refs/remotes/origin/gh-pages') do set HASGHPAGES=1
+            if not defined HASGHPAGES (
+              git checkout --orphan gh-pages
+              git rm -rf . 2>nul
+            ) else (
+              git checkout -B gh-pages origin/gh-pages
+              git reset --hard origin/gh-pages
+            )
 
-            git config user.email "%GIT_EMAIL%"
-            git config user.name  "%GIT_NAME%"
-
-            git fetch origin gh-pages --depth=1 2>nul || echo no-remote
-            git checkout -B gh-pages origin/gh-pages 2>nul || git checkout --orphan gh-pages
-
-            mkdir "%PAGES_DIR%" 2>nul
-            type nul > "%PAGES_DIR%\\.nojekyll"
-            move /Y .release\\*.tgz "%PAGES_DIR%\\" >nul
-
-            helm repo index "%PAGES_DIR%" --url %HELM_REPO_URL%
-
-            git add "%PAGES_DIR%"
-            git commit -m "publish chart %APP_NAME% %GIT_SHA%" 2>nul || echo nothing to commit
-
-            git push "https://%GHTOKEN%@github.com/%REPO_SLUG%.git" gh-pages --force
-            git checkout "%CURR%"
+            if not exist ${PAGES_DIR} mkdir ${PAGES_DIR}
+            type nul > ${PAGES_DIR}\\.nojekyll
+          """
+          powershell '''
+            $ErrorActionPreference = "Stop"
+            Move-Item ".release\\*.tgz" "${env:PAGES_DIR}\\" -Force
+            helm repo index "${env:PAGES_DIR}" --url ${env:HELM_REPO_URL}
+          '''
+          bat """
+            git add ${PAGES_DIR}
+            git commit -m "publish chart ${APP_NAME} ${GIT_SHA}" 2>nul || echo Nothing to commit
+            git push "https://${GHTOKEN}@github.com/${REPO_SLUG}.git" gh-pages
+            git checkout -f main
           """
         }
       }
@@ -150,41 +154,34 @@ pipeline {
     stage('Build & Push Docker') {
       when { changeset pattern: 'App/**', comparator: 'ANT' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds',
-                                          usernameVariable: 'DH_USER',
-                                          passwordVariable: 'DH_PASS')]) {
-          powershell """
-            \$ErrorActionPreference = 'Stop'
-            echo \$env:DH_PASS | docker login --username \$env:DH_USER --password-stdin
-            docker build -t ${env.DOCKER_IMAGE}:${env.GIT_SHA} -f App/Dockerfile App
-            docker push ${env.DOCKER_IMAGE}:${env.GIT_SHA}
+        withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          bat """
+            docker build -t ${DOCKER_REPO}:${GIT_SHA} -t ${DOCKER_REPO}:latest App
+            echo %DOCKER_PASS% | docker login --username %DOCKER_USER% --password-stdin
+            docker push ${DOCKER_REPO}:${GIT_SHA}
+            docker push ${DOCKER_REPO}:latest
+            docker logout
           """
         }
       }
     }
 
     stage('Deploy to minikube') {
-      // Run when Helm or the App changed (we produced a new image/tag)
       when {
-        anyOf {
+        allOf {
           changeset pattern: 'helm/**', comparator: 'ANT'
-          changeset pattern: 'App/**',  comparator: 'ANT'
+          expression { return env.GIT_SHA?.trim() }
         }
       }
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONF')]) {
-          powershell """
-            \$ErrorActionPreference = 'Stop'
-            \$env:KUBECONFIG = '${KUBECONF}'
-
-            helm upgrade --install ${env.APP_NAME} ${env.HELM_DIR} `
-              --namespace default --create-namespace `
-              --set image.repository=${env.DOCKER_IMAGE} `
-              --set image.tag=${env.GIT_SHA}
-
-            kubectl -n default rollout status deploy/${env.APP_NAME} --timeout=120s
-          """
-        }
+        powershell '''
+          $ErrorActionPreference = "Stop"
+          helm upgrade --install ${env:APP_NAME} ${env:HELM_DIR} `
+            --namespace default --create-namespace `
+            --set image.repository=${env:DOCKER_REPO} `
+            --set image.tag=${env:GIT_SHA} `
+            --wait
+        '''
       }
     }
   }
