@@ -21,7 +21,8 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          env.GIT_SHA = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          // capture clean short SHA (no echoed command lines)
+          env.GIT_SHA = powershell(returnStdout: true, script: '(git rev-parse --short HEAD).Trim()').trim()
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
       }
@@ -29,9 +30,7 @@ pipeline {
 
     stage('Helm Lint') {
       steps {
-        powershell """
-          helm lint ${env.CHART_DIR}
-        """
+        powershell "helm lint ${env.CHART_DIR}"
       }
     }
 
@@ -64,9 +63,7 @@ pipeline {
             mkdir docs 2>NUL || ver > NUL
             move /Y ${env.RELEASE_DIR}\\*.tgz docs\\
           """
-          powershell """
-            helm repo index docs --url ${env.PAGES_URL}
-          """
+          powershell "helm repo index docs --url ${env.PAGES_URL}"
           bat """
             git add docs
             git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart ${env.GIT_SHA}" || ver > NUL
@@ -112,11 +109,12 @@ pipeline {
   }
 }
 
-/**
- * Bump Chart.yaml patch + set appVersion = GIT_SHA,
- * and ensure values.yaml has the right repo and empty tag.
- */
-def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String dockerImage) {
+/** Helpers **/
+
+def bumpChartYaml(String chartFile, String valuesFile, String gitShaRaw, String dockerImage) {
+  // Make sure SHA is only the hash (no prompts / extra lines)
+  String sha = (gitShaRaw ?: "").readLines() ? gitShaRaw.readLines().last().trim() : gitShaRaw.trim()
+
   // ---- Chart.yaml ----
   String chart = readFile(chartFile)
   List<String> out = []
@@ -124,29 +122,31 @@ def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String doc
   boolean appSet = false
 
   chart.readLines().each { ln ->
-    if (!bumped && ln.trim() ==~ /version:\s*\d+\.\d+\.\d+.*/) {
-      def nums  = ln.replaceFirst(/.*version:\s*/, '').trim()
+    def t = ln.trim()
+    if (!bumped && t ==~ /version:\s*\d+\.\d+\.\d+.*/) {
+      def nums  = t.replaceFirst(/version:\s*/, '')
       def parts = nums.tokenize('.')
       int patch = (parts[2] as int) + 1
       out << "version: ${parts[0]}.${parts[1]}.${patch}"
       bumped = true
-    } else if (!appSet && ln.trim().startsWith('appVersion:')) {
-      out << "appVersion: \"${gitSha}\""
+    } else if (!appSet && t.startsWith('appVersion:')) {
+      out << "appVersion: \"${sha}\""
       appSet = true
     } else {
       out << ln
     }
   }
-  if (!appSet) { out << "appVersion: \"${gitSha}\"" }
+  if (!appSet) { out << "appVersion: \"${sha}\"" }
   writeFile file: chartFile, text: out.join('\n') + '\n'
 
   // ---- values.yaml ----
   String vals = readFile(valuesFile)
   List<String> vout = []
   vals.readLines().each { ln ->
-    if (ln.trim().startsWith('repository:')) {
+    def t = ln.trim()
+    if (t.startsWith('repository:')) {
       vout << "  repository: ${dockerImage}"
-    } else if (ln.trim().startsWith('tag:')) {
+    } else if (t.startsWith('tag:')) {
       vout << '  tag: ""'
     } else {
       vout << ln
@@ -154,6 +154,6 @@ def bumpChartYaml(String chartFile, String valuesFile, String gitSha, String doc
   }
   writeFile file: valuesFile, text: vout.join('\n') + '\n'
 
-  echo "Chart and values updated for ${gitSha}"
+  echo "Chart and values updated for ${sha}"
 }
 
