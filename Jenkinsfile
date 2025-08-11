@@ -6,7 +6,7 @@ pipeline {
     HELM_DIR      = 'helm/flaskapp'
     PAGES_DIR     = 'docs'
     HELM_REPO_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
-    REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'
+    REPO_SLUG     = 'azerez/devops0405-p3-Automation-CICD'   // owner/repo
     GIT_NAME      = 'jenkins-ci'
     GIT_EMAIL     = 'ci@example.local'
   }
@@ -27,7 +27,7 @@ pipeline {
       when { changeset pattern: 'helm/**', comparator: 'ANT' }
       steps {
         script {
-          // short SHA – via PowerShell, לוקחים רק את השורה האחרונה
+          // short SHA via PowerShell (last line only)
           def out = powershell(returnStdout: true, script: '(git rev-parse --short HEAD) | Select-Object -Last 1')
           env.GIT_SHA = out.trim()
 
@@ -46,14 +46,14 @@ pipeline {
           def newVer = "${major}.${minor}.${patch}"
           lines[verIdx] = "version: ${newVer}"
 
-          // appVersion -> SHA
+          // appVersion -> current SHA
           int appIdx = lines.findIndexOf { it.trim().startsWith('appVersion:') }
           if (appIdx >= 0) lines[appIdx] = "appVersion: ${env.GIT_SHA}"
           else lines += "appVersion: ${env.GIT_SHA}"
 
           writeFile file: chartPath, text: lines.join("\n")
 
-          // values.yaml tag (אם קיים)
+          // update image tag in values.yaml if present
           if (fileExists(valsPath)) {
             def vLines = readFile(valsPath).readLines()
             int tagIdx = vLines.findIndexOf { it.trim().startsWith('tag:') }
@@ -93,16 +93,18 @@ pipeline {
           git config user.email "%GIT_EMAIL%"
           git config user.name  "%GIT_NAME%"
 
-          rem fetch (התעלמות פלט שגיאה לא מזיק של git)
+          rem fetch remote gh-pages info
           git fetch origin gh-pages 2>nul
 
-          rem אם אין לנו סניף gh-pages מקומי – צור orphan
-          git show-ref --verify --quiet refs/heads/gh-pages
+          rem Base local gh-pages on origin/gh-pages if exists; else create orphan
+          git rev-parse --verify origin/gh-pages >nul 2>&1
           if errorlevel 1 (
+            echo No remote gh-pages found -> creating orphan
             git checkout --orphan gh-pages
             git rm -rf . 2>nul
           ) else (
-            git checkout gh-pages
+            echo Using remote origin/gh-pages as base
+            git checkout -B gh-pages origin/gh-pages
           )
 
           if not exist "%PAGES_DIR%" mkdir "%PAGES_DIR%"
@@ -114,7 +116,12 @@ pipeline {
 
           git add "%PAGES_DIR%"
           git commit -m "publish chart %APP_NAME% %GIT_SHA%" || echo Nothing to commit
+
           git push https://%GHTOKEN%@github.com/%REPO_SLUG%.git gh-pages
+          if errorlevel 1 (
+            echo Push failed. Aborting.
+            exit /b 1
+          )
 
           git checkout "!CURR!"
           endlocal
