@@ -19,8 +19,7 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // SHA נקי (ללא prompt)
-          env.GIT_SHA = powershell(returnStdout: true, script: '(git rev-parse --short HEAD).Trim()').trim()
+          env.GIT_SHA = powershell(returnStdout: true, script: '''(git rev-parse --short HEAD).Trim()''').trim()
           echo "GIT_SHA=${env.GIT_SHA}"
           env.CUR_BRANCH = env.BRANCH_NAME ?: 'main'
         }
@@ -30,17 +29,14 @@ pipeline {
     stage('Detect Changes') {
       steps {
         script {
-          // ודא שיש לנו origin/<branch>
-          powershell "git fetch origin ${env.CUR_BRANCH}"
+          powershell '''git fetch origin $env:CUR_BRANCH'''
+          def base = powershell(returnStdout:true, script: '''
+            $b = git merge-base HEAD origin/$env:CUR_BRANCH 2>$null
+            if (-not $b) { $b = (git rev-parse HEAD~1) }
+            $b.Trim()
+          ''').trim()
 
-          // נסה merge-base, ואם אין – fallback ל-HEAD~1
-          def base = powershell(returnStdout:true, script: """
-            \$b = git merge-base HEAD origin/${env.CUR_BRANCH} 2>\$null
-            if (-not \$b) { \$b = (git rev-parse HEAD~1) }
-            \$b.Trim()
-          """).trim()
-
-          def head = powershell(returnStdout:true, script: '(git rev-parse HEAD).Trim()').trim()
+          def head = powershell(returnStdout:true, script: '''(git rev-parse HEAD).Trim()''').trim()
           def diff = powershell(returnStdout:true, script: "git diff --name-only ${base} ${head}").trim()
           echo "Changed files:\n${diff}"
 
@@ -53,14 +49,13 @@ pipeline {
 
     stage('Helm Lint') {
       when { expression { fileExists("${env.CHART_DIR}/Chart.yaml") } }
-      steps { dir("${CHART_DIR}") { powershell 'helm lint .' } }
+      steps { dir("${CHART_DIR}") { powershell '''helm lint .''' } }
     }
 
     stage('Bump Chart Version (patch)') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
         dir("${CHART_DIR}") {
-          // מעלה patch ב-Chart.yaml (גרסה x.y.z -> x.y.(z+1))
           powershell '''
             $p = Get-Content Chart.yaml -Raw
             if ($p -match "version:\\s*(\\d+)\\.(\\d+)\\.(\\d+)") {
@@ -70,13 +65,12 @@ pipeline {
               Write-Host "Bumped chart version to $maj.$min.$pat"
             } else { throw "Could not find version in Chart.yaml" }
           '''
-          // קומיט מינימלי כדי לשמר היסטוריית גרסאות
-          powershell """
-            git config user.email "${GIT_EMAIL}"
-            git config user.name  "${GIT_USER}"
+          powershell '''
+            git config user.email "${env:GIT_EMAIL}"
+            git config user.name  "${env:GIT_USER}"
             git add Chart.yaml
-            git commit -m "ci: bump chart version [skip ci]" 2>$null; exit 0
-          """
+            git commit -m "ci: bump chart version [skip ci]" 2>$null; if ($LASTEXITCODE -ne 0) { exit 0 }
+          '''
         }
       }
     }
@@ -95,40 +89,34 @@ pipeline {
     stage('Publish to gh-pages') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
-        powershell """
-          git config user.email "${GIT_EMAIL}"
-          git config user.name  "${GIT_USER}"
+        powershell '''
+          git config user.email "${env:GIT_EMAIL}"
+          git config user.name  "${env:GIT_USER}"
 
           if (Test-Path .worktree) { Remove-Item -Recurse -Force .worktree }
           mkdir .worktree | Out-Null
 
-          git worktree add .worktree ${HELM_REPO_BRANCH} 2>$null
-          if (\$LASTEXITCODE -ne 0) {
-            git branch -D ${HELM_REPO_BRANCH} 2>$null
-            git checkout --orphan ${HELM_REPO_BRANCH}
+          git worktree add .worktree ${env:HELM_REPO_BRANCH} 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git branch -D ${env:HELM_REPO_BRANCH} 2>$null
+            git checkout --orphan ${env:HELM_REPO_BRANCH}
             git reset --hard
-            git worktree add .worktree ${HELM_REPO_BRANCH}
+            git worktree add .worktree ${env:HELM_REPO_BRANCH}
           }
 
           cd .worktree
-          if (Test-Path ..\\${RELEASE_DIR}\\*.tgz) {
-            Copy-Item ..\\${RELEASE_DIR}\\*.tgz .
-          }
-          if (Test-Path .\\index.yaml) {
-            helm repo index . --merge .\\index.yaml --url ./
-          } else {
-            helm repo index . --url ./
-          }
+          if (Test-Path ..\\${env:RELEASE_DIR}\\*.tgz) { Copy-Item ..\\${env:RELEASE_DIR}\\*.tgz . }
+          if (Test-Path .\\index.yaml) { helm repo index . --merge .\\index.yaml --url ./ } else { helm repo index . --url ./ }
+
           git add *.tgz,index.yaml 2>$null
-          git commit -m "ci: publish chart ${APP_NAME} (${env.GIT_SHA})" 2>$null
-          git push origin ${HELM_REPO_BRANCH}
-        """
+          git commit -m "ci: publish chart ${env:APP_NAME} (${env:GIT_SHA})" 2>$null
+          git push origin ${env:HELM_REPO_BRANCH}
+        '''
       }
     }
 
     stage('Build & Push Docker') {
       steps {
-        // אם צריך קרדנציאלס לדוקר האאב – עטוף ב-withCredentials/docker.withRegistry
         powershell """
           docker build -t ${DOCKER_IMAGE}:${env.GIT_SHA} -t ${DOCKER_IMAGE}:latest .
           docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
@@ -152,8 +140,8 @@ pipeline {
     stage('Smoke Test') {
       steps {
         powershell '''
-          kubectl -n '"${env.K8S_NAMESPACE}"' rollout status deploy/'"${env.APP_NAME}"' --timeout=120s
-          $np = kubectl -n '"${env.K8S_NAMESPACE}"' get svc '"${env.APP_NAME}"' -o jsonpath="{.spec.ports[0].nodePort}"
+          kubectl -n $env:K8S_NAMESPACE rollout status deploy/$env:APP_NAME --timeout=120s
+          $np = kubectl -n $env:K8S_NAMESPACE get svc $env:APP_NAME -o jsonpath="{.spec.ports[0].nodePort}"
           $ip = minikube ip
           curl -s "http://$ip:$np/health" | Out-String | Write-Host
         '''
@@ -162,7 +150,7 @@ pipeline {
   }
 
   post {
-    success { echo "✅ Build ${env.BUILD_NUMBER} OK. HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}" }
+    success { echo "Build ${env.BUILD_NUMBER} OK. HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}" }
     always  { cleanWs() }
   }
 }
