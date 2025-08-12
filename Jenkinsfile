@@ -1,10 +1,7 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-    skipDefaultCheckout(false)
-  }
+  options { timestamps(); skipDefaultCheckout(false) }
 
   environment {
     APP_NAME      = 'flaskapp'
@@ -38,84 +35,33 @@ pipeline {
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          // -------- Chart.yaml --------
-          def chartPath = "${CHART_DIR}/Chart.yaml"
-          def chartTxt  = readFile(chartPath)
+          // ---- Chart.yaml: bump patch + set appVersion safely with regex ----
+          def chartPath    = "${CHART_DIR}/Chart.yaml"
+          def chartContent = readFile(chartPath)
 
-          // bump version x.y.z -> x.y.(z+1)
-          def m = (chartTxt =~ /(?m)^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
-          if (m.find()) {
-            int x = m.group(1) as int
-            int y = m.group(2) as int
-            int z = (m.group(3) as int) + 1
-            def newVer = "${x}.${y}.${z}"
-            chartTxt = chartTxt.replaceFirst(/(?m)^\s*version:\s*[^\r\n]+/, "version: ${newVer}")
-          } else {
-            echo "WARN: version not found in Chart.yaml – leaving as-is"
+          // bump patch of semantic version in "version: X.Y.Z"
+          chartContent = chartContent.replaceFirst(/(?m)^(version:\s*)(\d+\.\d+\.\d+)/) { m, prefix, ver ->
+            def p = ver.split('\\.')
+            p[2] = ((p[2] as int) + 1).toString()
+            return "${prefix}${p.join('.')}"
           }
 
-          // set appVersion to current SHA (add if missing)
-          if ((chartTxt =~ /(?m)^\s*appVersion:\s*/).find()) {
-            chartTxt = chartTxt.replaceFirst(/(?m)^\s*appVersion:\s*[^\r\n]*/, "appVersion: ${env.GIT_SHA}")
-          } else {
-            chartTxt = chartTxt + System.lineSeparator() + "appVersion: ${env.GIT_SHA}" + System.lineSeparator()
+          // set appVersion to SHA (quoted) – keeps indentation/comments intact
+          chartContent = chartContent.replaceFirst(/(?m)^(appVersion:\s*).*/) { m, prefix ->
+            return "${prefix}\"${env.GIT_SHA}\""
           }
-          writeFile file: chartPath, text: chartTxt
 
-          // -------- values.yaml --------
+          writeFile(file: chartPath, text: chartContent)
+
+          // ---- values.yaml: set image.repository + tag (non-destructive) ----
           def valuesPath = "${CHART_DIR}/values.yaml"
-          def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
-          boolean inImage = false
-          int imageIndent = 0
-          boolean repoSet = false
-          boolean tagSet  = false
+          def vals = readFile(valuesPath)
+          // repository
+          vals = vals.replaceFirst(/(?m)^(\\s*repository:\\s*).*/, "\$1${DOCKER_IMAGE}")
+          // tag
+          vals = vals.replaceFirst(/(?m)^(\\s*tag:\\s*).*/, "\$1\"${env.GIT_SHA}\"")
+          writeFile(file: valuesPath, text: vals)
 
-          List out = []
-          lines.each { line ->
-            def leading = (line =~ /^\s*/)[0]
-            def trimmed = line.trim()
-
-            if (!inImage && trimmed ==~ /^image\s*:\s*(#.*)?$/) {
-              inImage = true
-              imageIndent = leading.size()
-              repoSet = false
-              tagSet  = false
-              out << line
-              return
-            }
-
-            if (inImage) {
-              if (trimmed && leading.size() <= imageIndent) {
-                // Leaving image block – add missing keys just before leaving
-                if (!repoSet) out << (" " * (imageIndent + 2)) + "repository: ${DOCKER_IMAGE}"
-                if (!tagSet)  out << (" " * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""
-                inImage = false
-                // fall-through for current line outside image
-              } else {
-                if (trimmed ==~ /^repository\s*:.*/) {
-                  out << (" " * (imageIndent + 2)) + "repository: ${DOCKER_IMAGE}"
-                  repoSet = true
-                  return
-                }
-                if (trimmed ==~ /^tag\s*:.*/) {
-                  out << (" " * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""
-                  tagSet = true
-                  return
-                }
-                out << line
-                return
-              }
-            }
-
-            out << line
-          }
-          // If file ended while still in image block, append missing keys
-          if (inImage) {
-            if (!repoSet) out << (" " * (imageIndent + 2)) + "repository: ${DOCKER_IMAGE}"
-            if (!tagSet)  out << (" " * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""
-          }
-
-          writeFile file: valuesPath, text: out.join('\n')
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
       }
@@ -130,28 +76,33 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
+REM Keep tgz before switching branches
 if not exist _chart_out mkdir _chart_out
-copy /Y .release\\*.tgz _chart_out\\ 1>NUL
+copy /Y .release\\*.tgz _chart_out\\ >NUL
+
+REM Git config (disable helpers)
+git config --global credential.helper ""
+git config --global user.name "jenkins-ci"
+git config --global user.email "jenkins@example.com"
 
 git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
 git stash --include-untracked 1>NUL 2>NUL
 git checkout -B gh-pages
 
 if not exist docs mkdir docs
-move /Y _chart_out\\*.tgz docs\\ 1>NUL
-rmdir /S /Q _chart_out 1>NUL
+move /Y _chart_out\\*.tgz docs\\ >NUL
+rmdir /S /Q _chart_out 2>NUL
 
 if exist docs\\index.yaml (
   helm repo index docs --merge docs\\index.yaml
 ) else (
   helm repo index docs
 )
-
 type NUL > docs\\.nojekyll
 
 set REMOTE=https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git
 git add docs
-git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
+git commit -m "publish chart %GIT_SHA%" || ver >NUL
 git push %REMOTE% HEAD:gh-pages --force
 '''
         }
@@ -185,8 +136,6 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
     }
   }
 
-  post {
-    always { cleanWs() }
-  }
+  post { always { cleanWs() } }
 }
 
