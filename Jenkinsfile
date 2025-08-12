@@ -11,6 +11,9 @@ pipeline {
     HELM_REPO_BRANCH = 'gh-pages'
     GIT_EMAIL        = 'ci-bot@example.com'
     GIT_USER         = 'ci-bot'
+    // defaults (will be overridden by auto-detect stage if possible)
+    DOCKERFILE       = 'Dockerfile'
+    DOCKER_CONTEXT   = '.'
   }
 
   stages {
@@ -35,12 +38,11 @@ pipeline {
             if (-not $b) { $b = (git rev-parse HEAD~1) }
             $b.Trim()
           ''').trim()
-
           def head = powershell(returnStdout:true, script: '''(git rev-parse HEAD).Trim()''').trim()
           def diff = powershell(returnStdout:true, script: "git diff --name-only ${base} ${head}").trim()
           echo "Changed files:\n${diff}"
 
-          def changed = diff.readLines().any { it.startsWith("${env.CHART_DIR}/") || it.startsWith('helm/') }
+          def changed = diff ? diff.readLines().any { it.startsWith("${env.CHART_DIR}/") || it.startsWith('helm/') } : false
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "HELM_CHANGED=${env.HELM_CHANGED}"
         }
@@ -115,10 +117,37 @@ pipeline {
       }
     }
 
+    stage('Locate Dockerfile') {
+      steps {
+        script {
+          // Try to find a Dockerfile if it is not in repo root
+          def found = powershell(returnStdout:true, script: '''
+            $candidates = @(
+              (Join-Path $PWD "Dockerfile"),
+              (Get-ChildItem -Recurse -Filter Dockerfile -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName })
+            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+            if ($candidates) {
+              $dir = Split-Path $candidates -Parent
+              Write-Output ("FILE={0}`nCTX={1}" -f $candidates,$dir)
+            }
+          ''').trim()
+
+          if (found) {
+            def parts = found.readLines().collectEntries { ln ->
+              def kv = ln.split('=',2); [(kv[0]): kv[1]]
+            }
+            env.DOCKERFILE = parts['FILE']
+            env.DOCKER_CONTEXT = parts['CTX']
+          }
+          echo "Docker build will use: -f ${env.DOCKERFILE}  context=${env.DOCKER_CONTEXT}"
+        }
+      }
+    }
+
     stage('Build & Push Docker') {
       steps {
         powershell """
-          docker build -t ${DOCKER_IMAGE}:${env.GIT_SHA} -t ${DOCKER_IMAGE}:latest .
+          docker build -f "${env.DOCKERFILE}" -t ${DOCKER_IMAGE}:${env.GIT_SHA} -t ${DOCKER_IMAGE}:latest "${env.DOCKER_CONTEXT}"
           docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
           docker push ${DOCKER_IMAGE}:latest
         """
