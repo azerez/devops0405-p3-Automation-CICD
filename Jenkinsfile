@@ -1,9 +1,7 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-  }
+  options { timestamps() }
 
   environment {
     CHART_DIR   = 'helm/flaskapp'
@@ -22,7 +20,11 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          env.GIT_SHA = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          // Capture only the last line (the SHA), then strip any non-hex chars
+          def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
+          def lines = out.readLines()
+          env.GIT_SHA = lines ? lines[-1].trim() : ''
+          env.GIT_SHA = env.GIT_SHA.replaceAll('[^0-9a-fA-F]', '')
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
       }
@@ -42,7 +44,7 @@ pipeline {
           final String chartPath  = "${env.CHART_DIR}/Chart.yaml"
           final String valuesPath = "${env.CHART_DIR}/values.yaml"
 
-          // ---- Chart.yaml (safe bump) ----
+          // --- Chart.yaml bump ---
           String chartText = readFile(chartPath)
           List<String> lines = chartText.readLines()
           boolean bumped = false
@@ -53,36 +55,30 @@ pipeline {
               int major = m.group(1).toInteger()
               int minor = m.group(2).toInteger()
               int patch = m.group(3).toInteger()
-              String newV = "${major}.${minor}.${patch + 1}"
-              lines[i] = "version: ${newV}".toString()
+              lines[i] = "version: ${major}.${minor}.${patch + 1}".toString()
               bumped = true
               break
             }
           }
-          if (!bumped) {
-            lines << "version: 0.1.0"
-          }
+          if (!bumped) { lines << "version: 0.1.0" }
 
           boolean appSet = false
           for (int i = 0; i < lines.size(); i++) {
             if ((lines[i] =~ /^\s*appVersion:/).find()) {
-              lines[i] = "appVersion: ${env.GIT_SHA}".toString()
+              lines[i] = "appVersion: \"${env.GIT_SHA}\"".toString()
               appSet = true
               break
             }
           }
-          if (!appSet) {
-            lines << "appVersion: ${env.GIT_SHA}".toString()
-          }
+          if (!appSet) { lines << "appVersion: \"${env.GIT_SHA}\"".toString() }
 
-          chartText = lines.join('\n')
-          writeFile(file: chartPath, text: chartText)
+          writeFile(file: chartPath, text: lines.join('\n'))
 
-          // ---- values.yaml (ensure repo+tag) ----
+          // --- values.yaml ensure repo+tag ---
           String valuesText = readFile(valuesPath)
 
-          def hasRepo = (valuesText =~ /(?m)^\s*repository:/).find()
-          def hasTag  = (valuesText =~ /(?m)^\s*tag:/).find()
+          def hasRepo  = (valuesText =~ /(?m)^\s*repository:/).find()
+          def hasTag   = (valuesText =~ /(?m)^\s*tag:/).find()
           def hasImage = (valuesText =~ /(?m)^\s*image:\s*$/).find() || valuesText.contains("\nimage:")
 
           if (hasRepo) {
@@ -170,9 +166,7 @@ helm upgrade --install flaskapp %CHART_DIR% --values %CHART_DIR%\\values.yaml --
   }
 
   post {
-    always {
-      cleanWs()
-    }
+    always { cleanWs() }
   }
 }
 
