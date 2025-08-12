@@ -1,6 +1,10 @@
 pipeline {
   agent any
-  options { timestamps(); skipDefaultCheckout(false) }
+
+  options {
+    timestamps()
+    skipDefaultCheckout(false)
+  }
 
   environment {
     APP_NAME      = 'flaskapp'
@@ -35,52 +39,113 @@ pipeline {
       steps {
         script {
           // ---------- Chart.yaml ----------
-          def chartPath = "${CHART_DIR}/Chart.yaml"
-          def lines = readFile(chartPath).readLines()
-          boolean sawVersion = false
-          boolean sawAppVersion = false
+          def chartPath  = "${CHART_DIR}/Chart.yaml"
+          def chartTxt   = readFile(chartPath)
+          def chartLines = chartTxt.split(/\r?\n/, -1) as List
 
-          for (int i = 0; i < lines.size(); i++) {
-            def ln = lines[i]
-
-            // version: X.Y.Z   -> bump Z
-            if (ln ==~ /\s*version:\s*\d+\.\d+\.\d+(\s*#.*)?\s*$/) {
-              def nums = (ln.findAll(/\d+/)).collect { it as int }
-              if (nums.size() >= 3) {
-                def bumped = "${nums[0]}.${nums[1]}.${nums[2] + 1}"
-                lines[i] = ln.replaceFirst(/\d+\.\d+\.\d+/, bumped)
-                sawVersion = true
-              }
-            }
-
-            // appVersion: "<sha>"
-            if (ln ==~ /\s*appVersion:.*/) {
-              lines[i] = ln.replaceFirst(/(?m)^(\s*appVersion:\s*).*/, "\$1\"${env.GIT_SHA}\"")
-              sawAppVersion = true
-            }
+          // bump version x.y.z -> x.y.(z+1)
+          int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
+          if (vIdx >= 0) {
+            def cur = chartLines[vIdx].split(':', 2)[1].trim()
+            def parts = cur.tokenize('.')
+            while (parts.size() < 3) { parts << '0' }
+            parts[2] = ((parts[2] as int) + 1).toString()
+            chartLines[vIdx] = "version: ${parts.join('.')}"
+          } else {
+            echo "WARN: version not found in Chart.yaml – leaving as-is"
           }
 
-          if (!sawAppVersion) {
-            lines << "appVersion: \"${env.GIT_SHA}\""
+          // appVersion -> GIT_SHA (add if missing)
+          int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
+          if (aIdx >= 0) {
+            chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
+          } else {
+            chartLines << "appVersion: ${env.GIT_SHA}"
           }
-          writeFile(file: chartPath, text: lines.join(System.lineSeparator()))
+
+          writeFile file: chartPath, text: chartLines.join('\n')
 
           // ---------- values.yaml ----------
           def valuesPath = "${CHART_DIR}/values.yaml"
-          def vals = readFile(valuesPath)
-          vals = vals.replaceFirst(/(?m)^(\s*repository:\s*).*/, "\$1${DOCKER_IMAGE}")
-          vals = vals.replaceFirst(/(?m)^(\s*tag:\s*).*/, "\$1\"${env.GIT_SHA}\"")
-          writeFile(file: valuesPath, text: vals)
+          def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
+          boolean inImage = false
+          int imageIndent = 0
+          boolean repoSet = false
+          boolean tagSet  = false
+          List out = []
 
+          lines.each { line ->
+            String trimmed = line.trim()
+            int leadLen = line.length() - trimmed.length()
+            if (leadLen < 0) leadLen = 0
+
+            if (!inImage && trimmed.startsWith('image:')) {
+              inImage = true
+              imageIndent = leadLen
+              repoSet = false
+              tagSet  = false
+              out << line
+              return
+            }
+
+            if (inImage) {
+              // אם ירדנו להזחה נמוכה/שווה – יציאה מהבלוק
+              if (trimmed && leadLen <= imageIndent) {
+                // הוסף מפתחות חסרים לפני היציאה
+                if (!repoSet) {
+                  def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+                  out << sp + "repository: ${DOCKER_IMAGE}"
+                }
+                if (!tagSet) {
+                  def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+                  out << sp + "tag: \"${env.GIT_SHA}\""
+                }
+                inImage = false
+                // עיבוד השורה הנוכחית מחוץ לבלוק
+                out << line
+                return
+              }
+
+              if (trimmed.startsWith('repository:')) {
+                def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+                out << sp + "repository: ${DOCKER_IMAGE}"
+                repoSet = true
+                return
+              }
+              if (trimmed.startsWith('tag:')) {
+                def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+                out << sp + "tag: \"${env.GIT_SHA}\""
+                tagSet = true
+                return
+              }
+
+              out << line
+              return
+            }
+
+            out << line
+          }
+
+          // אם קובץ נגמר בתוך הבלוק – הוסף חסרים בסוף
+          if (inImage) {
+            if (!repoSet) {
+              def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+              out << sp + "repository: ${DOCKER_IMAGE}"
+            }
+            if (!tagSet) {
+              def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+              out << sp + "tag: \"${env.GIT_SHA}\""
+            }
+          }
+
+          writeFile file: valuesPath, text: out.join('\n')
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
       }
     }
 
     stage('Package Chart') {
-      steps {
-        bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\""
-      }
+      steps { bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\"" }
     }
 
     stage('Publish to gh-pages') {
@@ -88,32 +153,28 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
-REM keep the artifact before switching branches
 if not exist _chart_out mkdir _chart_out
-copy /Y .release\\*.tgz _chart_out\\ >NUL
-
-git config --global credential.helper ""
-git config --global user.name "jenkins-ci"
-git config --global user.email "jenkins@example.com"
+copy /Y .release\\*.tgz _chart_out\\ 1>NUL
 
 git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
 git stash --include-untracked 1>NUL 2>NUL
 git checkout -B gh-pages
 
 if not exist docs mkdir docs
-move /Y _chart_out\\*.tgz docs\\ >NUL
-rmdir /S /Q _chart_out 2>NUL
+move /Y _chart_out\\*.tgz docs\\ 1>NUL
+rmdir /S /Q _chart_out 1>NUL
 
 if exist docs\\index.yaml (
   helm repo index docs --merge docs\\index.yaml
 ) else (
   helm repo index docs
 )
+
 type NUL > docs\\.nojekyll
 
 set REMOTE=https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git
 git add docs
-git commit -m "publish chart %GIT_SHA%" || ver >NUL
+git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
 git push %REMOTE% HEAD:gh-pages --force
 '''
         }
@@ -122,9 +183,7 @@ git push %REMOTE% HEAD:gh-pages --force
 
     stage('Build & Push Docker') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds',
-                                          usernameVariable: 'DOCKERHUB_USER',
-                                          passwordVariable: 'DOCKERHUB_PASS')]) {
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat """
 docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
 docker build -t ${DOCKER_IMAGE}:${env.GIT_SHA} .
@@ -149,6 +208,8 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
     }
   }
 
-  post { always { cleanWs() } }
+  post {
+    always { cleanWs() }
+  }
 }
 
