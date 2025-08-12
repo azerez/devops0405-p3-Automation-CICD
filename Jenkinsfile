@@ -3,17 +3,17 @@ pipeline {
   options { timestamps(); disableConcurrentBuilds() }
 
   environment {
-    APP_NAME         = 'flaskapp'
-    CHART_DIR        = 'helm/flaskapp'
-    RELEASE_DIR      = '.release'
-    DOCKER_IMAGE     = 'erezazu/devops0405-docker-flask-app'
-    K8S_NAMESPACE    = 'default'
-    HELM_REPO_BRANCH = 'gh-pages'
-    GIT_EMAIL        = 'ci-bot@example.com'
-    GIT_USER         = 'ci-bot'
-    // defaults (will be overridden by auto-detect stage if possible)
-    DOCKERFILE       = 'Dockerfile'
-    DOCKER_CONTEXT   = '.'
+    APP_NAME           = 'flaskapp'
+    CHART_DIR          = 'helm/flaskapp'
+    RELEASE_DIR        = '.release'
+    DOCKER_IMAGE       = 'erezazu/devops0405-docker-flask-app'
+    K8S_NAMESPACE      = 'default'
+    HELM_REPO_BRANCH   = 'gh-pages'
+    GIT_EMAIL          = 'ci-bot@example.com'
+    GIT_USER           = 'ci-bot'
+    // renamed to avoid conflict with Docker's DOCKER_CONTEXT env var
+    BUILD_DOCKERFILE   = 'Dockerfile'
+    BUILD_CONTEXT_PATH = '.'
   }
 
   stages {
@@ -103,7 +103,7 @@ pipeline {
             git branch -D ${env:HELM_REPO_BRANCH} 2>$null
             git checkout --orphan ${env:HELM_REPO_BRANCH}
             git reset --hard
-            git worktree add .worktree ${env:HELM_REPO_BRANCH}
+            git worktree add .worktree ${HELM_REPO_BRANCH}
           }
 
           cd .worktree
@@ -120,26 +120,23 @@ pipeline {
     stage('Locate Dockerfile') {
       steps {
         script {
-          // Try to find a Dockerfile if it is not in repo root
           def found = powershell(returnStdout:true, script: '''
-            $candidates = @(
-              (Join-Path $PWD "Dockerfile"),
-              (Get-ChildItem -Recurse -Filter Dockerfile -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { $_.FullName })
-            ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-            if ($candidates) {
-              $dir = Split-Path $candidates -Parent
-              Write-Output ("FILE={0}`nCTX={1}" -f $candidates,$dir)
+            $candidate = (Get-ChildItem -Recurse -Filter Dockerfile -ErrorAction SilentlyContinue | Select-Object -First 1)
+            if ($candidate) {
+              "FILE=$($candidate.FullName)`nCTX=$((Split-Path $candidate.FullName -Parent))"
+            } else {
+              if (Test-Path (Join-Path $PWD "Dockerfile")) {
+                "FILE=$((Join-Path $PWD "Dockerfile"))`nCTX=$PWD"
+              }
             }
           ''').trim()
 
           if (found) {
-            def parts = found.readLines().collectEntries { ln ->
-              def kv = ln.split('=',2); [(kv[0]): kv[1]]
-            }
-            env.DOCKERFILE = parts['FILE']
-            env.DOCKER_CONTEXT = parts['CTX']
+            def parts = found.readLines().collectEntries { ln -> def kv = ln.split('=',2); [(kv[0]): kv[1]] }
+            env.BUILD_DOCKERFILE   = parts['FILE']
+            env.BUILD_CONTEXT_PATH = parts['CTX']
           }
-          echo "Docker build will use: -f ${env.DOCKERFILE}  context=${env.DOCKER_CONTEXT}"
+          echo "Docker build will use: -f ${env.BUILD_DOCKERFILE}  context=${env.BUILD_CONTEXT_PATH}"
         }
       }
     }
@@ -147,7 +144,7 @@ pipeline {
     stage('Build & Push Docker') {
       steps {
         powershell """
-          docker build -f "${env.DOCKERFILE}" -t ${DOCKER_IMAGE}:${env.GIT_SHA} -t ${DOCKER_IMAGE}:latest "${env.DOCKER_CONTEXT}"
+          docker build -f "${env.BUILD_DOCKERFILE}" -t ${DOCKER_IMAGE}:${env.GIT_SHA} -t ${DOCKER_IMAGE}:latest "${env.BUILD_CONTEXT_PATH}"
           docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
           docker push ${DOCKER_IMAGE}:latest
         """
