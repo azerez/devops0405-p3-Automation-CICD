@@ -17,9 +17,7 @@ pipeline {
   stages {
 
     stage('Checkout SCM') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Init (capture SHA)') {
@@ -33,38 +31,84 @@ pipeline {
 
     stage('Helm Lint') {
       steps {
-        dir("${CHART_DIR}") {
-          bat 'helm lint .'
-        }
+        dir("${CHART_DIR}") { bat 'helm lint .' }
       }
     }
 
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          // ---- Chart.yaml (safe YAML) ----
+          // ---------- Chart.yaml ----------
           def chartPath = "${CHART_DIR}/Chart.yaml"
-          def chart = readYaml file: chartPath
+          def chartTxt  = readFile(chartPath)
 
-          // bump patch (x.y.z -> x.y.(z+1))
-          def parts = chart.version.toString().tokenize('.')
-          while (parts.size() < 3) { parts << '0' }
-          parts[2] = ((parts[2] as int) + 1).toString()
-          chart.version = parts.join('.')
+          // bump version x.y.z -> x.y.(z+1)
+          def m = (chartTxt =~ /(?m)^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
+          if (m.find()) {
+            int x = m.group(1) as int
+            int y = m.group(2) as int
+            int z = (m.group(3) as int) + 1
+            def newVer = "${x}.${y}.${z}"
+            chartTxt = chartTxt.replaceFirst(/(?m)^\s*version:\s*[^\r\n]+/, "version: ${newVer}")
+          } else {
+            echo "WARN: version not found in Chart.yaml – leaving as-is"
+[O          }
 
-          chart.appVersion = env.GIT_SHA
-          writeYaml file: chartPath, data: chart
+          // set appVersion to current SHA
+          if ((chartTxt =~ /(?m)^\s*appVersion:\s*/).find()) {
+            chartTxt = chartTxt.replaceFirst(/(?m)^\s*appVersion:\s*[^\r\n]*/, "appVersion: ${env.GIT_SHA}")
+          } else {
+            // אם אין appVersion – נוסיף בסוף הקובץ
+            chartTxt = chartTxt + System.lineSeparator() + "appVersion: ${env.GIT_SHA}" + System.lineSeparator()
+          }
+          writeFile file: chartPath, text: chartTxt
 
-          // ---- values.yaml (safe YAML) ----
+          // ---------- values.yaml ----------
           def valuesPath = "${CHART_DIR}/values.yaml"
-          def values = readYaml file: valuesPath
+          def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
+          boolean inImage = false
+          int imageIndent = 0
 
-          if (!values.image) { values.image = [:] }
-          values.image.repository = DOCKER_IMAGE
-          values.image.tag = env.GIT_SHA
-          values.image.pullPolicy = values.image.pullPolicy ?: 'IfNotPresent'
+          List out = []
+          lines.each { line ->
+            def leading = (line =~ /^\s*/)[0]
+            def trimmed = line.trim()
 
-          writeYaml file: valuesPath, data: values
+            if (!inImage && trimmed ==~ /^image\s*:\s*(#.*)?$/) {
+              inImage = true
+              imageIndent = leading.size()
+              out << line
+              return
+            }
+
+            if (inImage) {
+              // יציאה מהבלוק אם ירדנו חזרה להזחה נמוכה/שווה
+              if (trimmed && leading.size() <= imageIndent) {
+                inImage = false
+                // נפיל לוגיקה של שורה זו שוב מחוץ לבלוק
+                // by re-processing:
+                def l2 = line
+                // fall-through:
+                // (נעשה append בסוף הפונקציה)
+              } else {
+                // בתוך image:
+                if (trimmed ==~ /^repository\s*:.*/) {
+                  out << (" " * (imageIndent + 2)) + "repository: ${DOCKER_IMAGE}"
+                  return
+                }
+                if (trimmed ==~ /^tag\s*:.*/) {
+                  out << (" " * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""
+                  return
+                }
+                out << line
+                return
+              }
+            }
+
+            // מחוץ ל-image:
+            out << line
+          }
+          writeFile file: valuesPath, text: out.join('\n')
 
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
@@ -72,9 +116,7 @@ pipeline {
     }
 
     stage('Package Chart') {
-      steps {
-        bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\""
-      }
+      steps { bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\"" }
     }
 
     stage('Publish to gh-pages') {
@@ -138,9 +180,7 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
   }
 
   post {
-    always {
-      cleanWs()
-    }
+    always { cleanWs() }
   }
 }
 
