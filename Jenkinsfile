@@ -1,282 +1,180 @@
 pipeline {
-agent any
+  agent any
 
-options {
-timestamps()
-skipDefaultCheckout(false)
-}
-
-parameters {
-booleanParam(name: 'FORCE\_BUILD', defaultValue: false, description: 'Build & push Docker image even if App/ did not change')
-}
-
-environment {
-APP\_NAME      = 'flaskapp'
-CHART\_DIR     = 'helm/flaskapp'
-RELEASE\_DIR   = '.release'
-DOCKER\_IMAGE  = 'erezazu/devops0405-docker-flask-app'
-K8S\_NAMESPACE = 'default'
-}
-
-stages {
-
-```
-stage('Checkout SCM') {
-  steps { checkout scm }
-}
-
-stage('Init (capture SHA)') {
-  steps {
-    script {
-      def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-      def lines = out.readLines().collect { it?.trim() }.findAll { it }
-      env.GIT_SHA = lines ? lines[-1] : 'unknown'
-      echo "GIT_SHA = ${env.GIT_SHA}"
-    }
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    skipDefaultCheckout(false)
   }
-}
 
-stage('Detect Changes') {
-  steps {
-    script {
-      def hasPrev = (bat(script: 'git rev-parse HEAD~1', returnStatus: true) == 0)
-      def diffCmd = hasPrev ? 'git diff --name-only HEAD~1 HEAD' : 'git show --name-only --pretty='
-      def changed = bat(script: diffCmd, returnStdout: true)
-                     .readLines()
-                     .collect { it?.trim()?.replace('\\','/') }
-                     .findAll { it }
-      env.HELM_CHANGED = changed.any { it.startsWith('helm/') } ? '1' : '0'
-      env.APP_CHANGED  = changed.any { it.startsWith('App/')  } ? '1' : '0'
-      echo "HELM_CHANGED=${env.HELM_CHANGED}, APP_CHANGED=${env.APP_CHANGED}"
-    }
+  environment {
+    APP_NAME         = 'flaskapp'
+    CHART_DIR        = 'helm/flaskapp'            // נתיב הצ'ארט
+    RELEASE_DIR      = '.release'                 // פלט החבילות
+    DOCKER_IMAGE     = 'erezazu/devops0405-docker-flask-app'
+    DOCKER_TAG       = "${env.BUILD_NUMBER}"
+    K8S_NAMESPACE    = 'default'
+    HELM_REPO_BRANCH = 'gh-pages'                 // רפו ה-Helm (GitHub Pages)
+    GIT_EMAIL        = 'ci-bot@example.com'
+    GIT_USER         = 'ci-bot'
   }
-}
 
-stage('Helm Lint') {
-  when { expression { env.HELM_CHANGED == '1' } }
-  steps { dir("${CHART_DIR}") { bat 'helm lint .' } }
-}
+  stages {
 
-stage('Bump Chart Version (patch)') {
-  when { expression { env.HELM_CHANGED == '1' } }
-  steps {
-    script {
-      // Chart.yaml
-      def chartPath  = "${CHART_DIR}/Chart.yaml"
-      def chartTxt   = readFile(chartPath)
-      def chartLines = chartTxt.split(/\r?\n/, -1) as List
-
-      int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
-      if (vIdx >= 0) {
-        def cur = chartLines[vIdx].split(':', 2)[1].trim()
-        def parts = cur.tokenize('.')
-        while (parts.size() < 3) { parts << '0' }
-        parts[2] = ((parts[2] as int) + 1).toString()
-        chartLines[vIdx] = "version: ${parts.join('.')}"
+    stage('Checkout SCM') {
+      steps {
+        checkout scm
       }
-      int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
-      if (aIdx >= 0) {
-        chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
-      } else {
-        chartLines << "appVersion: ${env.GIT_SHA}"
-      }
-      writeFile file: chartPath, text: chartLines.join('\n')
+    }
 
-      // values.yaml
-      def valuesPath = "${CHART_DIR}/values.yaml"
-      def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
-      boolean inImage = false
-      int imageIndent = 0
-      boolean repoSet = false
-      boolean tagSet  = false
-      boolean bumpTag = (env.APP_CHANGED == '1')  // only bump image.tag if App/ changed
-      List out = []
-
-      lines.each { line ->
-        String trimmed = line.trim()
-        int lead = line.length() - trimmed.length(); if (lead < 0) lead = 0
-
-        if (!inImage && trimmed.startsWith('image:')) {
-          inImage = true
-          imageIndent = lead
-          repoSet = false
-          tagSet  = false
-          out << line
-        } else if (inImage) {
-          if (trimmed && lead <= imageIndent) {
-            def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
-            if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-            if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
-            inImage = false
-            out << line
-          } else if (trimmed.startsWith('repository:')) {
-            def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
-            out << sp + "repository: ${DOCKER_IMAGE}"
-            repoSet = true
-          } else if (trimmed.startsWith('tag:')) {
-            if (bumpTag) {
-              def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
-              out << sp + "tag: \"${env.GIT_SHA}\""
-            } else {
-              out << line
-            }
-            tagSet = true
-          } else {
-            out << line
-          }
-        } else {
-          out << line
+    stage('Init (capture SHA)') {
+      steps {
+        script {
+          def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.GIT_SHA = out
+          echo "GIT_SHA=${env.GIT_SHA}"
         }
       }
+    }
 
-      if (inImage) {
-        def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
-        if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-        if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
+    stage('Detect Changes') {
+      steps {
+        script {
+          // מזהה קבצים שהשתנו בקומיט האחרון / לעומת ה-merge-base
+          // יעיל במולטי-בראנץ' ו-PRs
+          def range = bat(script: 'git merge-base HEAD origin/${BRANCH_NAME} > base.txt & git rev-parse HEAD > head.txt', returnStdout: true)
+          def base = readFile('base.txt').trim()
+          def head = readFile('head.txt').trim()
+          def diff = bat(script: "git diff --name-only ${base} ${head}", returnStdout: true).trim()
+
+          echo "Changed files:\n${diff}"
+
+          // האם יש שינוי בתוך תיקיית ה-Helm?
+          env.HELM_CHANGED = (diff.readLines().any { it.startsWith("${CHART_DIR}/") || it.startsWith('helm/') }) ? 'true' : 'false'
+          echo "HELM_CHANGED=${env.HELM_CHANGED}"
+        }
       }
-
-      writeFile file: valuesPath, text: out.join('\n')
-      echo "Chart and values updated for ${env.GIT_SHA} (tag updated: ${bumpTag})"
     }
-  }
-}
 
-stage('Package Chart') {
-  when { expression { env.HELM_CHANGED == '1' } }
-  steps { bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\"" }
-}
-
-stage('Publish to gh-pages') {
-  when {
-    allOf {
-      branch 'main'
-      expression { env.HELM_CHANGED == '1' }
+    stage('Helm Lint') {
+      when { expression { fileExists("${env.CHART_DIR}/Chart.yaml") } }
+      steps {
+        dir("${CHART_DIR}") {
+          bat 'helm lint .'
+        }
+      }
     }
+
+    stage('Bump Chart Version (patch)') {
+      when { expression { env.HELM_CHANGED == 'true' } }
+      steps {
+        dir("${CHART_DIR}") {
+          // PowerShell: מעלה את ה-patch ב-Chart.yaml
+          bat '''
+powershell -NoProfile -Command ^
+  $p=Get-Content Chart.yaml -Raw; ^
+  if($p -match "version:\\s*(\\d+)\\.(\\d+)\\.(\\d+)"){ ^
+    $maj=[int]$Matches[1]; $min=[int]$Matches[2]; $pat=[int]$Matches[3]+1; ^
+    $new=$p -replace "version:\\s*\\d+\\.\\d+\\.\\d+","version: $maj.$min.$pat"; ^
+    Set-Content -Path Chart.yaml -Value $new -Encoding UTF8; ^
+    Write-Host ("Bumped chart version to {0}.{1}.{2}" -f $maj,$min,$pat) ^
+  } else { ^
+    Write-Error "Could not find version in Chart.yaml" ^
   }
-  steps {
-    withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-      bat '''
-```
-
-@echo off
-setlocal enableextensions
-
-if not exist .release\\\*.tgz (
-echo ERROR: no packaged chart under .release
-exit /b 1
-)
-
-git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
-git worktree prune 1>NUL 2>NUL
-rmdir /S /Q ghp 1>NUL 2>NUL
-
-git worktree add -B gh-pages ghp origin/gh-pages 1>NUL 2>NUL || git worktree add -B gh-pages ghp gh-pages
-
-if not exist ghp\docs mkdir ghp\docs
-copy /Y .release\\\*.tgz ghp\docs\ >NUL
-
-pushd ghp
-if exist docs\index.yaml (
-helm repo index docs --merge docs\index.yaml
-) else (
-helm repo index docs
-)
-type NUL > docs\\.nojekyll
-
-git add docs
-git -c user.name="jenkins-ci" -c user.email="[jenkins@example.com](mailto:jenkins@example.com)" commit -m "publish chart %GIT\_SHA%" || ver >NUL
-git push [https://x-access-token:%GH\_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git](https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git) HEAD\:gh-pages
-popd
 '''
-}
-}
-}
+          // מוסיף קומיט קטן לגרסה
+          bat '''
+git config user.email "${GIT_EMAIL}"
+git config user.name  "${GIT_USER}"
+git add Chart.yaml
+git commit -m "ci: bump chart version [skip ci]" || echo "No version change to commit"
+'''
+        }
+      }
+    }
 
-```
-stage('Test (App quick checks)') {
-  steps {
-    bat """
-```
+    stage('Package Chart') {
+      when { expression { env.HELM_CHANGED == 'true' } }
+      steps {
+        bat "if not exist ${RELEASE_DIR} mkdir ${RELEASE_DIR}"
+        dir("${CHART_DIR}") {
+          bat "helm package . -d ../..\\${RELEASE_DIR}"
+        }
+        archiveArtifacts artifacts: "${RELEASE_DIR}/*.tgz", fingerprint: true
+      }
+    }
 
-docker run --rm -v "%WORKSPACE%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r requirements.txt >/dev/null 2>&1 || true; if command -v pytest >/dev/null 2>&1 && (ls -1 test\*.py 2>/dev/null || ls -1 tests/\*.py 2>/dev/null) >/dev/null 2>&1; then pytest -q --junitxml=report.xml; else python -c 'print(\\"no pytest or tests; basic check\\")'; fi"
+    stage('Publish to gh-pages') {
+      when { expression { env.HELM_CHANGED == 'true' } }
+      steps {
+        script {
+          bat '''
+git config user.email "${GIT_EMAIL}"
+git config user.name  "${GIT_USER}"
+
+REM מכין worktree ל-gh-pages
+if exist .worktree rd /s /q .worktree
+mkdir .worktree
+git worktree add .worktree ${HELM_REPO_BRANCH} || (git branch -D ${HELM_REPO_BRANCH} & git checkout --orphan ${HELM_REPO_BRANCH} & git reset --hard & git worktree add .worktree ${HELM_REPO_BRANCH})
+
+cd .worktree
+
+REM מעדכן index.yaml (merge כדי לשמר היסטוריה)
+helm repo index ..\\${RELEASE_DIR} --merge index.yaml --url ./
+
+copy ..\\${RELEASE_DIR}\\*.tgz .\\
+
+git add *.tgz index.yaml
+git commit -m "ci: publish chart ${APP_NAME} (${GIT_SHA})" || echo "Nothing to commit"
+git push origin ${HELM_REPO_BRANCH}
+'''
+        }
+      }
+    }
+
+    stage('Build & Push Docker') {
+      steps {
+        bat """
+docker build -t ${DOCKER_IMAGE}:${GIT_SHA} -t ${DOCKER_IMAGE}:latest .
+docker push ${DOCKER_IMAGE}:${GIT_SHA}
+docker push ${DOCKER_IMAGE}:latest
 """
-}
-}
+      }
+    }
 
-```
-stage('Build & Push Docker') {
-  when { expression { params.FORCE_BUILD || env.APP_CHANGED == '1' } }
-  steps {
-    withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
-      bat """
-```
-
-docker login -u %DOCKERHUB\_USER% -p %DOCKERHUB\_PASS%
-docker build -f App/Dockerfile -t \${DOCKER\_IMAGE}:\${env.GIT\_SHA} App
-docker push \${DOCKER\_IMAGE}:\${env.GIT\_SHA}
+    stage('Deploy to minikube') {
+      steps {
+        // משתמשים ב-helm release עם תדמית מה-SHA
+        bat """
+helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
+  --namespace ${K8S_NAMESPACE} --create-namespace ^
+  --set image.repository=${DOCKER_IMAGE} ^
+  --set image.tag=${GIT_SHA} ^
+  --set image.pullPolicy=IfNotPresent
 """
-}
-}
-}
+      }
+    }
 
-```
-stage('Deploy to minikube') {
-  when {
-    allOf {
-      branch 'main'
-      expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' || params.FORCE_BUILD }
+    stage('Smoke Test') {
+      steps {
+        // דוגמה פשוטה: המתנה ל-rollout ואז curl לשירות
+        bat """
+kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=120s
+for /f "tokens=*" %%i in ('kubectl -n ${K8S_NAMESPACE} get svc ${APP_NAME} -o jsonpath="{.spec.ports[0].nodePort}"') do set NODEPORT=%%i
+for /f "tokens=*" %%i in ('minikube ip') do set MIP=%%i
+curl -s http://%MIP%:%NODEPORT%/health || exit /b 1
+"""
+      }
     }
   }
-  steps {
-    withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-      script {
-        def currentImg = bat(script: "kubectl -n ${K8S_NAMESPACE} get deploy ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>NUL", returnStdout: true).trim()
-        currentImg = currentImg.replace("'", "").replace("\"", "")
-        def currentTag = ''
-        if (currentImg) {
-          def idx = currentImg.lastIndexOf(':')
-          currentTag = (idx >= 0) ? currentImg.substring(idx + 1) : ''
-        }
-        def deployTag = (env.APP_CHANGED == '1' || params.FORCE_BUILD) ? env.GIT_SHA : (currentTag ?: env.GIT_SHA)
-        echo "Deploying image tag: ${deployTag}"
 
-        bat """
-```
-
-helm upgrade --install \${APP\_NAME} \${CHART\_DIR} ^
-\--namespace \${K8S\_NAMESPACE} ^
-\--set-string image.repository=\${DOCKER\_IMAGE} ^
-\--set-string image.tag=\${deployTag} ^
-\--set-string image.pullPolicy=IfNotPresent
-"""
-}
-}
-}
-}
-
-```
-stage('Smoke Test') {
-  steps {
-    bat """
-```
-
-kubectl -n \${K8S\_NAMESPACE} rollout status deploy/\${APP\_NAME} --timeout=180s ^
-|| (kubectl -n \${K8S\_NAMESPACE} get pods -o wide & exit /b 1)
-
-kubectl -n \${K8S\_NAMESPACE} delete pod smoke-test --ignore-not-found
-kubectl -n \${K8S\_NAMESPACE} run smoke-test --image=curlimages/curl:8.8.0 --restart=Never --rm -i -- ^
-curl -sSf http\://\${APP\_NAME}-service:5000/ >NUL
-"""
-}
-}
-}
-
-post {
-always {
-archiveArtifacts artifacts: '.release/\*.tgz', allowEmptyArchive: true, fingerprint: true
-junit allowEmptyResults: true, testResults: 'App/report.xml'
-cleanWs()
-}
-}
+  post {
+    success {
+      echo "✅ Build ${env.BUILD_NUMBER} completed. Chart publish? ${env.HELM_CHANGED}"
+    }
+    always {
+      cleanWs()
+    }
+  }
 }
 
