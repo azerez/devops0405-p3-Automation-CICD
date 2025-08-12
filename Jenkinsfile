@@ -7,10 +7,10 @@ pipeline {
   }
 
   environment {
-    APP_NAME     = 'flaskapp'
-    CHART_DIR    = 'helm/flaskapp'
-    RELEASE_DIR  = '.release'
-    DOCKER_IMAGE = 'erezazu/devops0405-docker-flask-app'
+    APP_NAME      = 'flaskapp'
+    CHART_DIR     = 'helm/flaskapp'
+    RELEASE_DIR   = '.release'
+    DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
     K8S_NAMESPACE = 'default'
   }
 
@@ -42,60 +42,30 @@ pipeline {
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          // ---- Chart.yaml ----
+          // ---- Chart.yaml (safe YAML) ----
           def chartPath = "${CHART_DIR}/Chart.yaml"
-          def chartText = readFile(chartPath)
-          def chartLines = chartText.readLines()
-          def newLines = []
-          String curVersion = null
-          chartLines.each { line ->
-            def t = line.trim()
-            if (t.startsWith('version:')) {
-              def v = t.substring('version:'.length()).trim()
-              curVersion = v
-              def parts = v.split('\\.')
-              if (parts.size() >= 3) {
-                parts[2] = ((parts[2] as int) + 1).toString()
-              }
-              def bumped = parts.join('.')
-              newLines << "version: ${bumped}"
-            } else if (t.startsWith('appVersion:')) {
-              newLines << "appVersion: ${env.GIT_SHA}"
-            } else {
-              newLines << line
-            }
-          }
-          writeFile(file: chartPath, text: newLines.join('\n'))
+          def chart = readYaml file: chartPath
 
-          // ---- values.yaml ----
+          // bump patch (x.y.z -> x.y.(z+1))
+          def parts = chart.version.toString().tokenize('.')
+          while (parts.size() < 3) { parts << '0' }
+          parts[2] = ((parts[2] as int) + 1).toString()
+          chart.version = parts.join('.')
+
+          chart.appVersion = env.GIT_SHA
+          writeYaml file: chartPath, data: chart
+
+          // ---- values.yaml (safe YAML) ----
           def valuesPath = "${CHART_DIR}/values.yaml"
-          def valuesText = readFile(valuesPath)
-          def vLines = valuesText.readLines()
-          def out = []
-          boolean inImage = false
-          vLines.each { line ->
-            def raw = line
-            def s = raw.trim()
-            if (s.startsWith('image:')) {
-              inImage = true
-              out << raw
-              return
-            }
-            if (inImage && s.startsWith('repository:')) {
-              out << raw.replaceFirst(/repository:.*/, "repository: ${DOCKER_IMAGE}")
-              return
-            }
-            if (inImage && s.startsWith('tag:')) {
-              out << raw.replaceFirst(/tag:.*/, "tag: \"${env.GIT_SHA}\"")
-              return
-            }
-            if (inImage && (s == '' || s.startsWith('#') || (!s.startsWith('repository:') && !s.startsWith('tag:') && !s.startsWith('pullPolicy:') && !s.startsWith('-') && !s.startsWith(' ')))) {
-              // left image block – naive but effective
-              inImage = false
-            }
-            out << raw
-          }
-          writeFile(file: valuesPath, text: out.join('\n'))
+          def values = readYaml file: valuesPath
+
+          if (!values.image) { values.image = [:] }
+          values.image.repository = DOCKER_IMAGE
+          values.image.tag = env.GIT_SHA
+          values.image.pullPolicy = values.image.pullPolicy ?: 'IfNotPresent'
+
+          writeYaml file: valuesPath, data: values
+
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
       }
@@ -112,7 +82,6 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
-REM keep packaged chart before switching branches
 if not exist _chart_out mkdir _chart_out
 copy /Y .release\\*.tgz _chart_out\\ 1>NUL
 
