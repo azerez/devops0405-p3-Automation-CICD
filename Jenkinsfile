@@ -1,30 +1,31 @@
 pipeline {
   agent any
 
-  options { timestamps() }
+  options {
+    timestamps()
+    skipDefaultCheckout(false)
+  }
 
   environment {
-    CHART_DIR   = 'helm/flaskapp'
-    RELEASE_DIR = '.release'
-    DOCS_DIR    = 'docs'
-    IMAGE_REPO  = 'erezazu/devops0405-docker-flask-app'
-    GIT_URL     = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
+    APP_NAME     = 'flaskapp'
+    CHART_DIR    = 'helm/flaskapp'
+    RELEASE_DIR  = '.release'
+    DOCKER_IMAGE = 'erezazu/devops0405-docker-flask-app'
+    K8S_NAMESPACE = 'default'
   }
 
   stages {
 
     stage('Checkout SCM') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Capture only the last line (the SHA), then strip any non-hex chars
-          def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-          def lines = out.readLines()
-          env.GIT_SHA = lines ? lines[-1].trim() : ''
-          env.GIT_SHA = env.GIT_SHA.replaceAll('[^0-9a-fA-F]', '')
+          env.GIT_SHA = bat(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
       }
@@ -32,7 +33,7 @@ pipeline {
 
     stage('Helm Lint') {
       steps {
-        dir("${env.CHART_DIR}") {
+        dir("${CHART_DIR}") {
           bat 'helm lint .'
         }
       }
@@ -41,64 +42,60 @@ pipeline {
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          final String chartPath  = "${env.CHART_DIR}/Chart.yaml"
-          final String valuesPath = "${env.CHART_DIR}/values.yaml"
-
-          // --- Chart.yaml bump ---
-          String chartText = readFile(chartPath)
-          List<String> lines = chartText.readLines()
-          boolean bumped = false
-
-          for (int i = 0; i < lines.size(); i++) {
-            def m = (lines[i] =~ /^\s*version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
-            if (m.find()) {
-              int major = m.group(1).toInteger()
-              int minor = m.group(2).toInteger()
-              int patch = m.group(3).toInteger()
-              lines[i] = "version: ${major}.${minor}.${patch + 1}".toString()
-              bumped = true
-              break
+          // ---- Chart.yaml ----
+          def chartPath = "${CHART_DIR}/Chart.yaml"
+          def chartText = readFile(chartPath)
+          def chartLines = chartText.readLines()
+          def newLines = []
+          String curVersion = null
+          chartLines.each { line ->
+            def t = line.trim()
+            if (t.startsWith('version:')) {
+              def v = t.substring('version:'.length()).trim()
+              curVersion = v
+              def parts = v.split('\\.')
+              if (parts.size() >= 3) {
+                parts[2] = ((parts[2] as int) + 1).toString()
+              }
+              def bumped = parts.join('.')
+              newLines << "version: ${bumped}"
+            } else if (t.startsWith('appVersion:')) {
+              newLines << "appVersion: ${env.GIT_SHA}"
+            } else {
+              newLines << line
             }
           }
-          if (!bumped) { lines << "version: 0.1.0" }
+          writeFile(file: chartPath, text: newLines.join('\n'))
 
-          boolean appSet = false
-          for (int i = 0; i < lines.size(); i++) {
-            if ((lines[i] =~ /^\s*appVersion:/).find()) {
-              lines[i] = "appVersion: \"${env.GIT_SHA}\"".toString()
-              appSet = true
-              break
+          // ---- values.yaml ----
+          def valuesPath = "${CHART_DIR}/values.yaml"
+          def valuesText = readFile(valuesPath)
+          def vLines = valuesText.readLines()
+          def out = []
+          boolean inImage = false
+          vLines.each { line ->
+            def raw = line
+            def s = raw.trim()
+            if (s.startsWith('image:')) {
+              inImage = true
+              out << raw
+              return
             }
+            if (inImage && s.startsWith('repository:')) {
+              out << raw.replaceFirst(/repository:.*/, "repository: ${DOCKER_IMAGE}")
+              return
+            }
+            if (inImage && s.startsWith('tag:')) {
+              out << raw.replaceFirst(/tag:.*/, "tag: \"${env.GIT_SHA}\"")
+              return
+            }
+            if (inImage && (s == '' || s.startsWith('#') || (!s.startsWith('repository:') && !s.startsWith('tag:') && !s.startsWith('pullPolicy:') && !s.startsWith('-') && !s.startsWith(' ')))) {
+              // left image block – naive but effective
+              inImage = false
+            }
+            out << raw
           }
-          if (!appSet) { lines << "appVersion: \"${env.GIT_SHA}\"".toString() }
-
-          writeFile(file: chartPath, text: lines.join('\n'))
-
-          // --- values.yaml ensure repo+tag ---
-          String valuesText = readFile(valuesPath)
-
-          def hasRepo  = (valuesText =~ /(?m)^\s*repository:/).find()
-          def hasTag   = (valuesText =~ /(?m)^\s*tag:/).find()
-          def hasImage = (valuesText =~ /(?m)^\s*image:\s*$/).find() || valuesText.contains("\nimage:")
-
-          if (hasRepo) {
-            valuesText = valuesText.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
-          }
-          if (hasTag) {
-            valuesText = valuesText.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: \"${env.GIT_SHA}\"")
-          }
-
-          if (!hasRepo || !hasTag) {
-            String extra = ''
-            if (!hasImage) extra += "image:\n"
-            if (!hasRepo) extra += "  repository: ${env.IMAGE_REPO}\n"
-            if (!valuesText.contains('pullPolicy:')) extra += "  pullPolicy: IfNotPresent\n"
-            if (!hasTag)  extra += "  tag: \"${env.GIT_SHA}\"\n"
-            valuesText += (valuesText.endsWith('\n') ? '' : '\n') + extra
-          }
-
-          writeFile(file: valuesPath, text: valuesText)
-
+          writeFile(file: valuesPath, text: out.join('\n'))
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
       }
@@ -106,7 +103,7 @@ pipeline {
 
     stage('Package Chart') {
       steps {
-        bat 'helm package -d "%RELEASE_DIR%" "%CHART_DIR%"'
+        bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\""
       }
     }
 
@@ -115,13 +112,17 @@ pipeline {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
+REM keep packaged chart before switching branches
+if not exist _chart_out mkdir _chart_out
+copy /Y .release\\*.tgz _chart_out\\ 1>NUL
+
 git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
-git add -A
 git stash --include-untracked 1>NUL 2>NUL
 git checkout -B gh-pages
 
 if not exist docs mkdir docs
-move /Y .release\\*.tgz docs\\
+move /Y _chart_out\\*.tgz docs\\ 1>NUL
+rmdir /S /Q _chart_out 1>NUL
 
 if exist docs\\index.yaml (
   helm repo index docs --merge docs\\index.yaml
@@ -131,42 +132,46 @@ if exist docs\\index.yaml (
 
 type NUL > docs\\.nojekyll
 
+set REMOTE=https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git
 git add docs
 git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
-git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" push %GIT_URL% HEAD:gh-pages --force
+git push %REMOTE% HEAD:gh-pages --force
 '''
         }
       }
     }
 
     stage('Build & Push Docker') {
-      when { branch 'main' }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DH_USER', passwordVariable: 'DH_PASS')]) {
-          bat '''
-docker login -u %DH_USER% -p %DH_PASS%
-docker build -t %IMAGE_REPO%:%GIT_SHA% -f App\\Dockerfile .
-docker push %IMAGE_REPO%:%GIT_SHA%
-'''
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+          bat """
+docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
+docker build -t ${DOCKER_IMAGE}:${env.GIT_SHA} .
+docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
+"""
         }
       }
     }
 
     stage('Deploy to minikube') {
-      when { branch 'main' }
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
-          bat '''
-set KUBECONFIG=%KCFG%
-helm upgrade --install flaskapp %CHART_DIR% --values %CHART_DIR%\\values.yaml --set image.repository=%IMAGE_REPO% --set image.tag=%GIT_SHA%
-'''
+        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+          bat """
+helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
+  --namespace ${K8S_NAMESPACE} ^
+  --set image.repository=${DOCKER_IMAGE} ^
+  --set image.tag=${env.GIT_SHA} ^
+  --set image.pullPolicy=IfNotPresent
+"""
         }
       }
     }
   }
 
   post {
-    always { cleanWs() }
+    always {
+      cleanWs()
+    }
   }
 }
 
