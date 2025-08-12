@@ -1,3 +1,4 @@
+```groovy
 pipeline {
   agent any
 
@@ -261,14 +262,19 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
 kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=180s ^
   || (kubectl -n ${K8S_NAMESPACE} get pods -o wide & exit /b 1)
 
+REM try to detect the service name by labels (quote the -l to keep the '=')
 set SVC=
-for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l app.kubernetes.io/instance=${APP_NAME} -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
-if not defined SVC for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l app.kubernetes.io/name=${APP_NAME} -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
-if not defined SVC set SVC=${APP_NAME}
+for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l "app.kubernetes.io/instance=${APP_NAME}" -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
+if not defined SVC for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l "app.kubernetes.io/name=${APP_NAME}" -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
+
+REM fallback to the common helm name
+if not defined SVC set SVC=${APP_NAME}-service
 
 kubectl -n ${K8S_NAMESPACE} get svc %SVC% || (kubectl -n ${K8S_NAMESPACE} get svc & echo ERROR: service not found & exit /b 2)
 
 for /f %%u in ('minikube service %SVC% --url -n ${K8S_NAMESPACE}') do set URL=%%u
+if not defined URL (echo ERROR: URL not resolved & exit /b 3)
+
 curl -sSf %URL% > NUL
 """
       }
@@ -285,4 +291,5 @@ curl -sSf %URL% > NUL
     }
   }
 }
+```
 
