@@ -3,25 +3,21 @@ pipeline {
 
   options {
     timestamps()
-    skipDefaultCheckout(true)     // נבצע checkout ידני כשלב ראשון
+    skipDefaultCheckout(true)
     disableConcurrentBuilds()
   }
 
   environment {
-    // --- paths & chart repo ---
     CHART_DIR    = 'helm/flaskapp'
     RELEASE_DIR  = '.release'
     GH_PAGES_URL = 'https://azerez.github.io/devops0405-p3-Automation-CICD'
 
-    // --- docker image (must match values.yaml defaults) ---
     IMAGE_REPO   = 'erezazu/devops0405-docker-flask-app'
   }
 
   stages {
     stage('Checkout SCM') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Init (capture SHA)') {
@@ -34,25 +30,17 @@ pipeline {
     }
 
     stage('Helm Lint') {
-      steps {
-        dir(env.CHART_DIR) {
-          powershell 'helm lint .'
-        }
-      }
+      steps { dir(env.CHART_DIR) { powershell 'helm lint .' } }
     }
 
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          // --- bump Chart.yaml: version (patch++) & appVersion = GIT_SHA ---
           def chartText = readFile("${env.CHART_DIR}/Chart.yaml")
-          chartText = chartText.replaceAll(/(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/) { all, maj, min, pat ->
-            "version: ${maj}.${min}.${(pat as int) + 1}"
-          }
+          chartText = chartText.replaceAll(/(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/) { all, a,b,c -> "version: ${a}.${b}.${(c as int)+1}" }
           chartText = chartText.replaceAll(/(?m)^appVersion:\s*.*/, "appVersion: ${env.GIT_SHA}")
           writeFile file: "${env.CHART_DIR}/Chart.yaml", text: chartText
 
-          // --- update values.yaml: image.repository & image.tag ---
           def valuesText = readFile("${env.CHART_DIR}/values.yaml")
           valuesText = valuesText
             .replaceAll(/(?m)^(\s*repository:\s*).*/, "\$1${env.IMAGE_REPO}")
@@ -64,11 +52,8 @@ pipeline {
 
     stage('Package Chart') {
       steps {
-        powershell """
-          if (!(Test-Path '${env.RELEASE_DIR}')) { New-Item -ItemType Directory -Path '${env.RELEASE_DIR}' | Out-Null }
-        """
+        powershell "if (!(Test-Path '${env.RELEASE_DIR}')) { New-Item -ItemType Directory -Path '${env.RELEASE_DIR}' | Out-Null }"
         dir(env.CHART_DIR) {
-          // שמור את החבילה בתיקיית .release בשורש ה-workspace
           powershell "helm package . -d '${env.WORKSPACE}\\\\${env.RELEASE_DIR}'"
         }
       }
@@ -77,15 +62,19 @@ pipeline {
     stage('Publish to gh-pages') {
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GHTOKEN')]) {
-          bat '''
+          bat """
             git fetch origin gh-pages 2>NUL || ver 1>NUL
             git checkout -B gh-pages
             mkdir docs 2>NUL || ver 1>NUL
             move /Y %WORKSPACE%\\%RELEASE_DIR%\\*.tgz docs\\
-          '''
-          // (יבנה/יעדכן index.yaml)
+          """
+          // build/merge index.yaml WITHOUT $null
           powershell """
-            helm repo index 'docs' --url '${env.GH_PAGES_URL}' --merge 'docs/index.yaml' 2>$null
+            if (Test-Path 'docs/index.yaml') {
+              helm repo index 'docs' --url '${env.GH_PAGES_URL}' --merge 'docs/index.yaml'
+            } else {
+              helm repo index 'docs' --url '${env.GH_PAGES_URL}'
+            }
           """
           bat '''
             git add docs
@@ -112,7 +101,6 @@ pipeline {
     stage('Deploy to minikube') {
       steps {
         withKubeConfig([credentialsId: 'kubeconfig']) {
-          // התקנה/שדרוג בעזרת ה-image וה-tag שהוגדרו
           powershell """
             helm upgrade --install flaskapp ${env.CHART_DIR} `
               --namespace flaskapp --create-namespace `
@@ -124,10 +112,6 @@ pipeline {
     }
   }
 
-  post {
-    always {
-      cleanWs()
-    }
-  }
+  post { always { cleanWs() } }
 }
 
