@@ -58,7 +58,7 @@ pipeline {
         script {
           // ---- Chart.yaml ----
           def chartPath  = "${CHART_DIR}/Chart.yaml"
-[O          def chartTxt   = readFile(chartPath)
+          def chartTxt   = readFile(chartPath)
           def chartLines = chartTxt.split(/\r?\n/, -1) as List
 
           int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
@@ -99,7 +99,7 @@ pipeline {
               repoSet = false
               tagSet  = false
               out << line
-              return
+              continue
             }
 
             if (inImage) {
@@ -109,24 +109,23 @@ pipeline {
                 if (!tagSet)  out << sp + "tag: \"${env.GIT_SHA}\""
                 inImage = false
                 out << line
-                return
+                continue
               }
 
               if (trimmed.startsWith('repository:')) {
                 def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
                 out << sp + "repository: ${DOCKER_IMAGE}"
                 repoSet = true
-                return
+                continue
               }
               if (trimmed.startsWith('tag:')) {
                 def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
                 out << sp + "tag: \"${env.GIT_SHA}\""
                 tagSet = true
-                return
+                continue
               }
-
               out << line
-              return
+              continue
             }
 
             out << line
