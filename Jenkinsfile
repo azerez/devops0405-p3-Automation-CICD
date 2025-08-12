@@ -6,6 +6,10 @@ pipeline {
     skipDefaultCheckout(false)
   }
 
+  parameters {
+    booleanParam(name: 'FORCE_BUILD', defaultValue: false, description: 'Build & push Docker image even if App/ did not change')
+  }
+
   environment {
     APP_NAME      = 'flaskapp'
     CHART_DIR     = 'helm/flaskapp'
@@ -68,10 +72,7 @@ pipeline {
             while (parts.size() < 3) { parts << '0' }
             parts[2] = ((parts[2] as int) + 1).toString()
             chartLines[vIdx] = "version: ${parts.join('.')}"
-          } else {
-            echo "WARN: version not found in Chart.yaml – leaving as-is"
           }
-
           int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
           if (aIdx >= 0) {
             chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
@@ -87,16 +88,16 @@ pipeline {
           int imageIndent = 0
           boolean repoSet = false
           boolean tagSet  = false
-          boolean bumpTag = (env.APP_CHANGED == '1')   // only touch image.tag if app changed
+          boolean bumpTag = (env.APP_CHANGED == '1')   // only change image.tag if App/ changed
           List out = []
 
           lines.each { line ->
             String trimmed = line.trim()
-            int leadLen = line.length() - trimmed.length(); if (leadLen < 0) leadLen = 0
+            int lead = line.length() - trimmed.length(); if (lead < 0) lead = 0
 
             if (!inImage && trimmed.startsWith('image:')) {
               inImage = true
-              imageIndent = leadLen
+              imageIndent = lead
               repoSet = false
               tagSet  = false
               out << line
@@ -104,9 +105,8 @@ pipeline {
             }
 
             if (inImage) {
-              // leaving the image block
-              if (trimmed && leadLen <= imageIndent) {
-                def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
+              if (trimmed && lead <= imageIndent) {
+                def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                 if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
                 if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
                 inImage = false
@@ -115,14 +115,15 @@ pipeline {
               }
 
               if (trimmed.startsWith('repository:')) {
-                def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
+                def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                 out << sp + "repository: ${DOCKER_IMAGE}"
                 repoSet = true
                 return
               }
+
               if (trimmed.startsWith('tag:')) {
                 if (bumpTag) {
-                  def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
+                  def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                   out << sp + "tag: \"${env.GIT_SHA}\""
                   tagSet = true
                   return
@@ -141,9 +142,9 @@ pipeline {
           }
 
           if (inImage) {
-            def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
+            def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
             if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-            if (!tagSet && bumpTag)  out << sp + "tag: \"${env.GIT_SHA}\""
+            if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
           }
 
           writeFile file: valuesPath, text: out.join('\n')
@@ -207,7 +208,7 @@ docker run --rm -v "%CD%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r
     }
 
     stage('Build & Push Docker') {
-      when { expression { env.APP_CHANGED == '1' } }
+      when { anyOf { expression { env.APP_CHANGED == '1' }, expression { params.FORCE_BUILD } } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat """
@@ -224,23 +225,23 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
           script {
-            def setTag = (env.APP_CHANGED == '1')
-            if (setTag) {
-              bat """
-helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
-  --namespace ${K8S_NAMESPACE} ^
-  --set image.repository=${DOCKER_IMAGE} ^
-  --set image.tag=${env.GIT_SHA} ^
-  --set image.pullPolicy=IfNotPresent
-"""
-            } else {
-              bat """
-helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
-  --namespace ${K8S_NAMESPACE} ^
-  --set image.repository=${DOCKER_IMAGE} ^
-  --set image.pullPolicy=IfNotPresent
-"""
+            // choose tag: if app changed -> new SHA, else reuse current cluster tag (fallback to SHA)
+            def currentImg = bat(script: "kubectl -n ${K8S_NAMESPACE} get deploy ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>NUL", returnStdout: true).trim()
+            def currentTag = ''
+            if (currentImg) {
+              def idx = currentImg.lastIndexOf(':')
+              currentTag = (idx >= 0) ? currentImg.substring(idx + 1) : ''
             }
+            def deployTag = (env.APP_CHANGED == '1' || params.FORCE_BUILD) ? env.GIT_SHA : (currentTag ?: env.GIT_SHA)
+            echo "Deploying image tag: ${deployTag}"
+
+            bat """
+helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
+  --namespace ${K8S_NAMESPACE} ^
+  --set image.repository=${DOCKER_IMAGE} ^
+  --set image.tag=${deployTag} ^
+  --set image.pullPolicy=IfNotPresent
+"""
           }
         }
       }
