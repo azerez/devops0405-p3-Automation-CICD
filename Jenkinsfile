@@ -101,44 +101,31 @@ pipeline {
               repoSet = false
               tagSet  = false
               out << line
-              return
-            }
-
-            if (inImage) {
+            } else if (inImage) {
               if (trimmed && lead <= imageIndent) {
                 def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                 if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
                 if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
                 inImage = false
                 out << line
-                return
-              }
-
-              if (trimmed.startsWith('repository:')) {
+              } else if (trimmed.startsWith('repository:')) {
                 def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                 out << sp + "repository: ${DOCKER_IMAGE}"
                 repoSet = true
-                return
-              }
-
-              if (trimmed.startsWith('tag:')) {
+              } else if (trimmed.startsWith('tag:')) {
                 if (bumpTag) {
                   def sp = ''; for (int i=0; i<imageIndent+2; i++) { sp += ' ' }
                   out << sp + "tag: \"${env.GIT_SHA}\""
-                  tagSet = true
-                  return
                 } else {
                   out << line
-                  tagSet = true
-                  return
                 }
+                tagSet = true
+              } else {
+                out << line
               }
-
+            } else {
               out << line
-              return
             }
-
-            out << line
           }
 
           if (inImage) {
@@ -159,7 +146,12 @@ pipeline {
     }
 
     stage('Publish to gh-pages') {
-      when { allOf { branch 'main'; expression { env.HELM_CHANGED == '1' } } }
+      when {
+        allOf {
+          branch 'main'
+          expression { env.HELM_CHANGED == '1' }
+        }
+      }
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
@@ -208,7 +200,12 @@ docker run --rm -v "%CD%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r
     }
 
     stage('Build & Push Docker') {
-      when { anyOf { expression { env.APP_CHANGED == '1' }, expression { params.FORCE_BUILD } } }
+      when {
+        anyOf {
+          expression { env.APP_CHANGED == '1' }
+          expression { params.FORCE_BUILD }
+        }
+      }
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat """
@@ -221,7 +218,12 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
     }
 
     stage('Deploy to minikube') {
-      when { allOf { branch 'main'; expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' } } }
+      when {
+        allOf {
+          branch 'main'
+          expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' }
+        }
+      }
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
           script {
@@ -248,7 +250,12 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
     }
 
     stage('Smoke Test') {
-      when { allOf { branch 'main'; expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' } } }
+      when {
+        allOf {
+          branch 'main'
+          expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' }
+        }
+      }
       steps {
         bat """
 kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=180s ^
