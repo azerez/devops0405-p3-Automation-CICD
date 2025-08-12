@@ -23,7 +23,7 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Windows 'bat' echoes the command line. Keep only the last non-empty line.
+          // ב-Windows bat מחזיר גם את שורת הפקודה – נשמור רק את השורה האחרונה שאינה ריקה
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
           def lines = out.readLines().collect { it?.trim() }.findAll { it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
@@ -38,6 +38,7 @@ pipeline {
       }
     }
 
+    // Bump בטוח לקבצי YAML בלי readYaml/Matcher/repeat
     stage('Bump Chart Version (patch)') {
       steps {
         script {
@@ -58,14 +59,13 @@ pipeline {
             echo "WARN: version not found in Chart.yaml – leaving as-is"
           }
 
-          // appVersion -> GIT_SHA (add if missing)
+          // appVersion -> SHA (להוסיף אם חסר)
           int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
           if (aIdx >= 0) {
             chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
           } else {
             chartLines << "appVersion: ${env.GIT_SHA}"
           }
-
           writeFile file: chartPath, text: chartLines.join('\n')
 
           // ---------- values.yaml ----------
@@ -92,9 +92,9 @@ pipeline {
             }
 
             if (inImage) {
-              // left the image block (indentation reduced)
+              // יציאה מהבלוק (הזחה קטנה/שווה)
               if (trimmed && leadLen <= imageIndent) {
-                // add missing keys before leaving
+                // הוסף מפתחות חסרים לפני היציאה
                 if (!repoSet) {
                   def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
                   out << sp + "repository: ${DOCKER_IMAGE}"
@@ -128,16 +128,11 @@ pipeline {
             out << line
           }
 
-          // file ended while still in image block
+          // אם הסתיים הקובץ בתוך הבלוק – הוסף חסרים
           if (inImage) {
-            if (!repoSet) {
-              def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-              out << sp + "repository: ${DOCKER_IMAGE}"
-            }
-            if (!tagSet) {
-              def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-              out << sp + "tag: \"${env.GIT_SHA}\""
-            }
+            def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
+            if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
+            if (!tagSet)  out << sp + "tag: \"${env.GIT_SHA}\""
           }
 
           writeFile file: valuesPath, text: out.join('\n')
@@ -150,34 +145,45 @@ pipeline {
       steps { bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\"" }
     }
 
+    // פרסום יציב ל-gh-pages באמצעות worktree (ללא stash/checkout על אותו עץ)
     stage('Publish to gh-pages') {
       when { branch 'main' }
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
           bat '''
-if not exist _chart_out mkdir _chart_out
-copy /Y .release\\*.tgz _chart_out\\ 1>NUL
+@echo off
+setlocal enableextensions
 
+REM ודא שיש חבילה
+if not exist .release\\*.tgz (
+  echo ERROR: no .tgz under .release
+  exit /b 1
+)
+
+REM worktree ל-gh-pages
 git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
-git stash --include-untracked 1>NUL 2>NUL
-git checkout -B gh-pages
+git worktree prune 1>NUL 2>NUL
+rmdir /S /Q ghp 1>NUL 2>NUL
 
-if not exist docs mkdir docs
-move /Y _chart_out\\*.tgz docs\\ 1>NUL
-rmdir /S /Q _chart_out 1>NUL
+git worktree add -B gh-pages ghp origin/gh-pages 1>NUL 2>NUL || git worktree add -B gh-pages ghp gh-pages
 
+if not exist ghp\\docs mkdir ghp\\docs
+copy /Y .release\\*.tgz ghp\\docs\\ >NUL
+
+pushd ghp
 if exist docs\\index.yaml (
   helm repo index docs --merge docs\\index.yaml
 ) else (
   helm repo index docs
 )
-
 type NUL > docs\\.nojekyll
 
-set REMOTE=https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git
 git add docs
 git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
-git push %REMOTE% HEAD:gh-pages --force
+git push https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git HEAD:gh-pages
+popd
+
+endlocal
 '''
         }
       }
@@ -188,7 +194,7 @@ git push %REMOTE% HEAD:gh-pages --force
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat """
 docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-docker build -t ${DOCKER_IMAGE}:${env.GIT_SHA} .
+docker build -f App/Dockerfile -t ${DOCKER_IMAGE}:${env.GIT_SHA} App
 docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
 """
         }
