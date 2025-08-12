@@ -87,6 +87,7 @@ pipeline {
           int imageIndent = 0
           boolean repoSet = false
           boolean tagSet  = false
+          boolean bumpTag = (env.APP_CHANGED == '1')   // only touch image.tag if app changed
           List out = []
 
           lines.each { line ->
@@ -99,33 +100,41 @@ pipeline {
               repoSet = false
               tagSet  = false
               out << line
-              continue
+              return
             }
 
             if (inImage) {
+              // leaving the image block
               if (trimmed && leadLen <= imageIndent) {
                 def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
                 if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-                if (!tagSet)  out << sp + "tag: \"${env.GIT_SHA}\""
+                if (!tagSet && bumpTag) out << sp + "tag: \"${env.GIT_SHA}\""
                 inImage = false
                 out << line
-                continue
+                return
               }
 
               if (trimmed.startsWith('repository:')) {
                 def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
                 out << sp + "repository: ${DOCKER_IMAGE}"
                 repoSet = true
-                continue
+                return
               }
               if (trimmed.startsWith('tag:')) {
-                def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
-                out << sp + "tag: \"${env.GIT_SHA}\""
-                tagSet = true
-                continue
+                if (bumpTag) {
+                  def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
+                  out << sp + "tag: \"${env.GIT_SHA}\""
+                  tagSet = true
+                  return
+                } else {
+                  out << line
+                  tagSet = true
+                  return
+                }
               }
+
               out << line
-              continue
+              return
             }
 
             out << line
@@ -134,11 +143,11 @@ pipeline {
           if (inImage) {
             def sp=''; for (int i=0; i<imageIndent+2; i++) sp+=' '
             if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-            if (!tagSet)  out << sp + "tag: \"${env.GIT_SHA}\""
+            if (!tagSet && bumpTag)  out << sp + "tag: \"${env.GIT_SHA}\""
           }
 
           writeFile file: valuesPath, text: out.join('\n')
-          echo "Chart and values updated for ${env.GIT_SHA}"
+          echo "Chart and values updated for ${env.GIT_SHA} (tag updated: ${bumpTag})"
         }
       }
     }
@@ -214,13 +223,25 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
       when { allOf { branch 'main'; expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' } } }
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          bat """
+          script {
+            def setTag = (env.APP_CHANGED == '1')
+            if (setTag) {
+              bat """
 helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
   --namespace ${K8S_NAMESPACE} ^
   --set image.repository=${DOCKER_IMAGE} ^
   --set image.tag=${env.GIT_SHA} ^
   --set image.pullPolicy=IfNotPresent
 """
+            } else {
+              bat """
+helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
+  --namespace ${K8S_NAMESPACE} ^
+  --set image.repository=${DOCKER_IMAGE} ^
+  --set image.pullPolicy=IfNotPresent
+"""
+            }
+          }
         }
       }
     }
