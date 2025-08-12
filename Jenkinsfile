@@ -58,7 +58,7 @@ pipeline {
         script {
           // ---- Chart.yaml ----
           def chartPath  = "${CHART_DIR}/Chart.yaml"
-          def chartTxt   = readFile(chartPath)
+[O          def chartTxt   = readFile(chartPath)
           def chartLines = chartTxt.split(/\r?\n/, -1) as List
 
           int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
@@ -192,7 +192,6 @@ endlocal
 
     stage('Test (App quick checks)') {
       steps {
-        // Run lightweight tests inside Python container to avoid local Python dependency
         bat """
 docker run --rm -v "%CD%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r requirements.txt >/dev/null 2>&1 || true; if command -v pytest >/dev/null 2>&1 && (ls -1 test*.py 2>/dev/null || ls -1 tests/*.py 2>/dev/null) >/dev/null 2>&1; then pytest -q --junitxml=report.xml; else python -c 'print(\\\"no pytest or tests; basic check\\\")'; fi"
 """
@@ -231,8 +230,17 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
       when { allOf { branch 'main'; expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' } } }
       steps {
         bat """
-kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=90s
-for /f %%i in ('minikube service ${APP_NAME} --url -n ${K8S_NAMESPACE}') do set URL=%%i
+kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=180s ^
+  || (kubectl -n ${K8S_NAMESPACE} get pods -o wide & exit /b 1)
+
+set SVC=
+for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l app.kubernetes.io/instance=${APP_NAME} -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
+if not defined SVC for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l app.kubernetes.io/name=${APP_NAME} -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
+if not defined SVC set SVC=${APP_NAME}
+
+kubectl -n ${K8S_NAMESPACE} get svc %SVC% || (kubectl -n ${K8S_NAMESPACE} get svc & echo ERROR: service not found & exit /b 2)
+
+for /f %%u in ('minikube service %SVC% --url -n ${K8S_NAMESPACE}') do set URL=%%u
 curl -sSf %URL% > NUL
 """
       }
