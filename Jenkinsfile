@@ -1,4 +1,3 @@
-```groovy
 pipeline {
   agent any
 
@@ -89,7 +88,7 @@ pipeline {
           int imageIndent = 0
           boolean repoSet = false
           boolean tagSet  = false
-          boolean bumpTag = (env.APP_CHANGED == '1')   // only change image.tag if App/ changed
+          boolean bumpTag = (env.APP_CHANGED == '1')   // tag רק אם האפליקציה השתנתה
           List out = []
 
           lines.each { line ->
@@ -160,7 +159,7 @@ pipeline {
 setlocal enableextensions
 
 if not exist .release\\*.tgz (
-  echo ERROR: no .tgz under .release
+  echo ERROR: no packaged chart under .release
   exit /b 1
 )
 
@@ -185,8 +184,6 @@ git add docs
 git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
 git push https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git HEAD:gh-pages
 popd
-
-endlocal
 '''
         }
       }
@@ -195,18 +192,13 @@ endlocal
     stage('Test (App quick checks)') {
       steps {
         bat """
-docker run --rm -v "%CD%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r requirements.txt >/dev/null 2>&1 || true; if command -v pytest >/dev/null 2>&1 && (ls -1 test*.py 2>/dev/null || ls -1 tests/*.py 2>/dev/null) >/dev/null 2>&1; then pytest -q --junitxml=report.xml; else python -c 'print(\\\"no pytest or tests; basic check\\\")'; fi"
+docker run --rm -v "%WORKSPACE%":/ws -w /ws/App python:3.11-slim sh -lc "pip install -r requirements.txt >/dev/null 2>&1 || true; if command -v pytest >/dev/null 2>&1 && (ls -1 test*.py 2>/dev/null || ls -1 tests/*.py 2>/dev/null) >/dev/null 2>&1; then pytest -q --junitxml=report.xml; else python -c 'print(\\\"no pytest or tests; basic check\\\")'; fi"
 """
       }
     }
 
     stage('Build & Push Docker') {
-      when {
-        anyOf {
-          expression { env.APP_CHANGED == '1' }
-          expression { params.FORCE_BUILD }
-        }
-      }
+      when { expression { params.FORCE_BUILD || env.APP_CHANGED == '1' } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat """
@@ -222,18 +214,18 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
       when {
         allOf {
           branch 'main'
-          expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' }
+          expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' || params.FORCE_BUILD }
         }
       }
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
           script {
-            // choose tag: if app changed -> new SHA, else reuse current cluster tag (fallback to SHA)
+            // fallback to current running tag if no new app build
             def currentImg = bat(script: "kubectl -n ${K8S_NAMESPACE} get deploy ${APP_NAME} -o jsonpath='{.spec.template.spec.containers[0].image}' 2>NUL", returnStdout: true).trim()
             def currentTag = ''
             if (currentImg) {
               def idx = currentImg.lastIndexOf(':')
-              currentTag = (idx >= 0) ? currentImg.substring(idx + 1) : ''
+              currentTag = (idx >= 0) ? currentImg.substring(idx + 1).replaceAll(\"'\",'') : ''
             }
             def deployTag = (env.APP_CHANGED == '1' || params.FORCE_BUILD) ? env.GIT_SHA : (currentTag ?: env.GIT_SHA)
             echo "Deploying image tag: ${deployTag}"
@@ -241,9 +233,9 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
             bat """
 helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
   --namespace ${K8S_NAMESPACE} ^
-  --set image.repository=${DOCKER_IMAGE} ^
-  --set image.tag=${deployTag} ^
-  --set image.pullPolicy=IfNotPresent
+  --set-string image.repository=${DOCKER_IMAGE} ^
+  --set-string image.tag=${deployTag} ^
+  --set-string image.pullPolicy=IfNotPresent
 """
           }
         }
@@ -251,45 +243,26 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
     }
 
     stage('Smoke Test') {
-      when {
-        allOf {
-          branch 'main'
-          expression { env.APP_CHANGED == '1' || env.HELM_CHANGED == '1' }
-        }
-      }
       steps {
         bat """
 kubectl -n ${K8S_NAMESPACE} rollout status deploy/${APP_NAME} --timeout=180s ^
   || (kubectl -n ${K8S_NAMESPACE} get pods -o wide & exit /b 1)
 
-REM try to detect the service name by labels (quote the -l to keep the '=')
-set SVC=
-for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l "app.kubernetes.io/instance=${APP_NAME}" -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
-if not defined SVC for /f %%s in ('kubectl -n ${K8S_NAMESPACE} get svc -l "app.kubernetes.io/name=${APP_NAME}" -o jsonpath^="{.items[0].metadata.name}"') do set SVC=%%s
-
-REM fallback to the common helm name
-if not defined SVC set SVC=${APP_NAME}-service
-
-kubectl -n ${K8S_NAMESPACE} get svc %SVC% || (kubectl -n ${K8S_NAMESPACE} get svc & echo ERROR: service not found & exit /b 2)
-
-for /f %%u in ('minikube service %SVC% --url -n ${K8S_NAMESPACE}') do set URL=%%u
-if not defined URL (echo ERROR: URL not resolved & exit /b 3)
-
-curl -sSf %URL% > NUL
+kubectl -n ${K8S_NAMESPACE} delete pod smoke-test --ignore-not-found
+kubectl -n ${K8S_NAMESPACE} run smoke-test --image=curlimages/curl:8.8.0 --restart=Never --rm -i -- ^
+  curl -sSf http://${APP_NAME}-service:5000/ >NUL
 """
       }
     }
   }
 
   post {
-    success {
-      junit allowEmptyResults: true, testResults: 'App/report.xml'
-      archiveArtifacts artifacts: '.release/*.tgz', fingerprint: true, allowEmptyArchive: true
-    }
     always {
+      // artifacts & test results (empty ok)
+      archiveArtifacts artifacts: '.release/*.tgz', allowEmptyArchive: true, fingerprint: true
+      junit allowEmptyResults: true, testResults: 'App/report.xml'
       cleanWs()
     }
   }
 }
-```
 
