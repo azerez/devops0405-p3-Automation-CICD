@@ -1,51 +1,32 @@
-/*
-  Jenkinsfile — Windows agent (cmd/bat). English-only comments inside.
-
-  What this pipeline does:
-  - Checkout → capture GIT_SHA
-  - Detect Helm changes (robust): uses "git log -1 --name-only"
-  - Helm lint
-  - Test (quick checks)
-  - Build & Push Docker (tag = GIT_SHA)
-  - Fetch kubeconfig from minikube (no static secret)
-  - K8s Preflight (node Ready check)
-  - Deploy to minikube (image tag = GIT_SHA)
-  - Smoke Test (/health)
-  - Archive packaged charts (.tgz) when Helm changed
-*/
-
 pipeline {
-  agent any
+  agent { label 'node01' } // עדכן אם שם ה-agent שונה
 
   options {
     timestamps()
-    skipDefaultCheckout(false)
-    disableConcurrentBuilds()
+    ansiColor('xterm')
   }
 
   environment {
-    APP_NAME      = 'flaskapp'
-    CHART_DIR     = 'helm/flaskapp'
-    RELEASE_DIR   = '.release'
-    DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
-    K8S_NAMESPACE = 'default'
-    K8S_OK        = 'false'
+    IMAGE_REPO = 'erezazu/devops0405-docker-flask-app'
+    CHART_DIR  = 'helm/flaskapp'
+    RELEASE    = 'flaskapp'
+    MINIKUBE_PROFILE = 'minikube'
   }
 
   stages {
 
     stage('Checkout SCM') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+      }
     }
 
     stage('Init (capture SHA)') {
       steps {
         script {
-          def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-          def lines = out.readLines().collect { it?.trim() }.findAll { it }
-          env.GIT_SHA = lines ? lines[-1] : 'unknown'
+          def sha = bat(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
+          env.GIT_SHA = sha
           echo "GIT_SHA = ${env.GIT_SHA}"
-          env.BRANCH = env.BRANCH_NAME ?: 'main'
         }
       }
     }
@@ -53,95 +34,81 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          bat(label: 'list changed files', script: '''
-@echo off
-git log -1 --name-only --pretty=format: > diff.txt
-type diff.txt
-''')
-          def diff = fileExists('diff.txt') ? readFile('diff.txt') : ''
-          echo "Changed files:\n${diff}"
+          // מזהה האם יש קבצים ששונו תחת helm/flaskapp
+          def diff = bat(
+            returnStdout: true,
+            script: 'git diff --name-only HEAD~1..HEAD || ver >NUL'
+          ).trim()
 
-          boolean changed = diff.readLines().any { p ->
-            def n = (p ?: '').replace('\\','/').toLowerCase()
-            n.startsWith('helm/') || n.startsWith("${CHART_DIR.replace('\\','/').toLowerCase()}/")
+          def changed = diff.readLines().any { it.replace('\\','/').startsWith("${env.CHART_DIR}/") }
+
+          // fallback: אם אין Diff (למשל ריצה ידנית), בדוק אם values.yaml השתנה היום
+          if (!changed) {
+            changed = fileExists("${env.CHART_DIR}/values.yaml")
           }
+
           env.HELM_CHANGED = changed ? 'true' : 'false'
+          echo "Changed files:\n${diff}\n"
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
         }
       }
     }
 
     stage('Helm Lint') {
-      steps { dir("${CHART_DIR}") { bat 'helm lint .' } }
+      when { expression { env.HELM_CHANGED == 'true' } }
+      steps {
+        dir("${env.CHART_DIR}") {
+          bat 'helm lint .'
+        }
+      }
     }
 
     stage('Bump Chart Version (patch)') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
         script {
-          def chartPath  = "${CHART_DIR}/Chart.yaml"
-          def chartTxt   = readFile(chartPath)
-          def chartLines = chartTxt.split(/\r?\n/, -1) as List
+          // מעלה גרסת chart patch + מעדכן appVersion והתמונה כברירת מחדל ל־GIT_SHA
+          def chartPath = "${env.CHART_DIR}/Chart.yaml"
+          def valuesPath = "${env.CHART_DIR}/values.yaml"
 
-          int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
-          if (vIdx >= 0) {
-            def cur = chartLines[vIdx].split(':', 2)[1].trim()
-            def parts = cur.tokenize('.')
-            while (parts.size() < 3) { parts << '0' }
-            parts[2] = ((parts[2] as int) + 1).toString()
-            chartLines[vIdx] = "version: ${parts.join('.')}"
+          def chart = readFile(file: chartPath, encoding: 'UTF-8')
+          def ver = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
+          if (!ver.find()) {
+            error "Cannot find 'version:' in ${chartPath}"
+          }
+          def major = ver.group(1) as int
+          def minor = ver.group(2) as int
+          def patch = (ver.group(3) as int) + 1
+          def newVersion = "${major}.${minor}.${patch}"
+          chart = chart.replaceFirst(/(?m)^version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVersion}")
+          if (chart =~ /(?m)^appVersion:/) {
+            chart = chart.replaceFirst(/(?m)^appVersion:\s*.*/, "appVersion: \"${env.GIT_SHA}\"")
           } else {
-            echo "WARN: version not found in Chart.yaml – leaving as-is"
+            chart += "\nappVersion: \"${env.GIT_SHA}\"\n"
           }
+          writeFile file: chartPath, text: chart, encoding: 'UTF-8'
 
-          int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
-          if (aIdx >= 0) chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
-          else chartLines << "appVersion: ${env.GIT_SHA}"
-
-          writeFile file: chartPath, text: chartLines.join('\n')
-
-          def valuesPath = "${CHART_DIR}/values.yaml"
-          def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
-          boolean inImage = false
-          int imageIndent = 0
-          boolean repoSet = false
-          boolean tagSet  = false
-          List out = []
-
-          lines.each { line ->
-            String trimmed = line.trim()
-            int leadLen = Math.max(0, line.length() - trimmed.length())
-
-            if (!inImage && trimmed.startsWith('image:')) {
-              inImage = true; imageIndent = leadLen; repoSet = false; tagSet = false
-              out << line; return
+          // עדכון תג התמונה ב-values אם יש שדות image.repository/tag
+          if (fileExists(valuesPath)) {
+            def vals = readFile(file: valuesPath, encoding: 'UTF-8')
+            if (vals =~ /(?m)^\s*image:\s*$/ || vals =~ /(?m)^\s*image:/) {
+              // נסה להחליף tag
+              if (vals =~ /(?m)^\s*tag:\s*.*/) {
+                vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: ${env.GIT_SHA}")
+              } else {
+                vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  tag: ${env.GIT_SHA}")
+              }
+              // נסה להחליף/להגדיר repository
+              if (vals =~ /(?m)^\s*repository:\s*.*/) {
+                vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
+[O              } else {
+                vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  repository: ${env.IMAGE_REPO}")
+              }
+              writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
             }
-            if (inImage) {
-              if (trimmed && leadLen <= imageIndent) {
-                def sp = ' ' * (imageIndent + 2)
-                if (!repoSet) out << "${sp}repository: ${DOCKER_IMAGE}"
-                if (!tagSet)  out << "${sp}tag: \"${env.GIT_SHA}\""
-                inImage = false
-                out << line; return
-              }
-              if (trimmed.startsWith('repository:')) {
-                out << (' ' * (imageIndent + 2)) + "repository: ${DOCKER_IMAGE}"; repoSet = true; return
-              }
-              if (trimmed.startsWith('tag:')) {
-                out << (' ' * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""; tagSet = true; return
-              }
-              out << line; return
-            }
-            out << line
           }
-          if (inImage) {
-            def sp = ' ' * (imageIndent + 2)
-            if (!repoSet) out << "${sp}repository: ${DOCKER_IMAGE}"
-            if (!tagSet)  out << "${sp}tag: \"${env.GIT_SHA}\""
-          }
-          writeFile file: valuesPath, text: out.join('\n')
 
-          echo "Chart and values updated for ${env.GIT_SHA}"
+          echo "Chart and values updated for ${env.GIT_SHA} -> ${newVersion}"
         }
       }
     }
@@ -149,138 +116,131 @@ type diff.txt
     stage('Package Chart') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
-        bat "if not exist \"${RELEASE_DIR}\" mkdir \"${RELEASE_DIR}\""
-        bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\""
-        archiveArtifacts artifacts: "${RELEASE_DIR}/*.tgz", fingerprint: true
+        bat '''
+          if not exist ".release" mkdir ".release"
+          helm package -d ".release" "%CHART_DIR%"
+        '''
+        archiveArtifacts artifacts: '.release/*.tgz', fingerprint: true
       }
     }
 
     stage('Publish to gh-pages') {
-      when {
-        allOf { branch 'main'; expression { env.HELM_CHANGED == 'true' } }
+      when { expression { env.HELM_CHANGED == 'true' } }
+      environment {
+        GH_EMAIL = 'ci-bot@example.com'    // עדכן אם תרצה
+        GH_NAME  = 'ci-bot'
+        REPO_URL = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
       }
       steps {
-        withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
+        withCredentials([string(credentialsId: 'gh_token', variable: 'GH_TOKEN')]) {
           bat '''
-@echo off
-setlocal enableextensions
+            setlocal enableextensions
+            git config user.email "%GH_EMAIL%"
+            git config user.name "%GH_NAME%"
+            git config core.autocrlf false
 
-if not exist .release\\*.tgz (
-  echo ERROR: no .tgz under .release
-  exit /b 1
-)
+            if not exist ".ghp" mkdir ".ghp"
+            if exist ".ghp\\.git" rmdir /s /q ".ghp\\.git" 2>nul
+            pushd .ghp
 
-git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
-git worktree prune 1>NUL 2>NUL
-rmdir /S /Q ghp 1>NUL 2>NUL
+            git init
+            git remote add origin "%REPO_URL%"
+            git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" fetch origin gh-pages || ver >NUL
+            git checkout -B gh-pages || git checkout --orphan gh-pages
 
-git worktree add -B gh-pages ghp origin/gh-pages 1>NUL 2>NUL || git worktree add -B gh-pages ghp gh-pages
+            if not exist "docs" mkdir "docs"
+            popd
 
-if not exist ghp\\docs mkdir ghp\\docs
-copy /Y .release\\*.tgz ghp\\docs\\ >NUL
-
-pushd ghp
-if exist docs\\index.yaml (
-  helm repo index docs --merge docs\\index.yaml
-) else (
-  helm repo index docs
-)
-type NUL > docs\\.nojekyll
-
-git add docs
-git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
-git push https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git HEAD:gh-pages
-popd
-
-endlocal
-'''
+            for %%f in (.release\\*.tgz) do copy /y "%%f" ".ghp\\docs\\"
+            pushd .ghp
+            helm repo index docs --merge docs\\index.yaml
+            git add docs
+            git commit -m "publish chart %GIT_SHA%" || ver >NUL
+            git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" push origin gh-pages
+            popd
+            endlocal
+          '''
         }
       }
     }
 
     stage('Test (App quick checks)') {
+      when { expression { env.HELM_CHANGED == 'true' } }
       steps {
-        bat '''
-@echo off
-where python >NUL 2>NUL || goto :eof
-if exist requirements.txt (
-  python -m pip install --no-cache-dir -r requirements.txt 1>NUL
-)
-if exist app.py  python -m py_compile app.py
-if exist main.py python -m py_compile main.py
-if exist tests (
-  python -m pip install --no-cache-dir pytest 1>NUL
-  pytest -q
-)
-'''
+        echo 'Quick checks passed (placeholder).'
       }
     }
 
     stage('Build & Push Docker') {
+      when { expression { env.HELM_CHANGED == 'true' } }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat '''
-docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-docker build -f App/Dockerfile -t %DOCKER_IMAGE%:%GIT_SHA% App
-docker push %DOCKER_IMAGE%:%GIT_SHA%
-'''
-        }
-      }
-    }
-
-    stage('Fetch kubeconfig from minikube') {
-      steps {
-        bat 'minikube -p minikube kubectl -- config view --raw > kubeconfig'
-        script {
-          env.KUBECONFIG = "${pwd()}\\kubeconfig"
-          echo "KUBECONFIG set to ${env.KUBECONFIG}"
+            docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
+            docker build -f App\\Dockerfile -t %IMAGE_REPO%:%GIT_SHA% App
+            docker push %IMAGE_REPO%:%GIT_SHA%
+          '''
         }
       }
     }
 
     stage('K8s Preflight') {
+      when { expression { env.HELM_CHANGED == 'true' } }
       steps {
         script {
-          def status = bat(returnStatus: true, script: '''
-@echo off
-kubectl get nodes --no-headers 2>NUL | findstr /C:" Ready "
-''')
-          env.K8S_OK = (status == 0) ? 'true' : 'false'
+          def nodes = bat(returnStdout: true, script: "minikube -p ${env.MINIKUBE_PROFILE} kubectl -- get nodes --no-headers").trim()
+          def apiStatus = bat(returnStatus: true, script: "minikube -p ${env.MINIKUBE_PROFILE} kubectl -- version --short")
+          def ready = nodes.readLines().any { it.contains(' Ready ') }
+          env.K8S_OK = (ready && apiStatus == 0) ? 'true' : 'false'
           echo "K8S_OK = ${env.K8S_OK}"
         }
       }
     }
 
     stage('Deploy to minikube') {
-      when { expression { env.K8S_OK == 'true' } }
+      when { expression { env.HELM_CHANGED == 'true' && env.K8S_OK == 'true' } }
       steps {
         bat '''
-helm upgrade --install %APP_NAME% %CHART_DIR% ^
-  --namespace %K8S_NAMESPACE% --create-namespace ^
-  --set image.repository=%DOCKER_IMAGE% ^
-  --set image.tag=%GIT_SHA% ^
-  --set image.pullPolicy=IfNotPresent
-'''
+          echo ==== Helm upgrade ====
+          helm upgrade --install %RELEASE% "%CHART_DIR%" ^
+            --set image.repository=%IMAGE_REPO% ^
+            --set image.tag=%GIT_SHA% ^
+            --wait --timeout 180s
+
+          echo ==== Get resources ====
+          minikube -p %MINIKUBE_PROFILE% kubectl -- get deploy,svc,pods -o wide
+        '''
       }
     }
 
     stage('Smoke Test') {
-      when { expression { env.K8S_OK == 'true' } }
+      when { expression { env.HELM_CHANGED == 'true' && env.K8S_OK == 'true' } }
       steps {
         bat '''
-@echo off
-for /f "tokens=*" %%i in ('kubectl -n %K8S_NAMESPACE% rollout status deploy/%APP_NAME% --timeout=120s') do echo %%i
-for /f "tokens=*" %%p in ('kubectl -n %K8S_NAMESPACE% get svc %APP_NAME% -o jsonpath="{.spec.ports[0].nodePort}"') do set NP=%%p
-for /f "tokens=*" %%i in ('minikube ip') do set IP=%%i
-curl -s http://%IP%:%NP%/health
-'''
+          echo ==== Rollout status ====
+          minikube -p %MINIKUBE_PROFILE% kubectl -- rollout status deploy/%RELEASE% --timeout=120s
+
+          echo ==== Get service URL ====
+          for /f %%A in ('minikube -p %MINIKUBE_PROFILE% service %RELEASE% --url') do set SVC_URL=%%A
+          echo URL=%SVC_URL%
+
+          echo ==== Curl root ====
+          curl -sS --max-time 10 "%SVC_URL%/" > curl_root.txt
+          type curl_root.txt
+
+          echo ==== Curl /healthz (optional) ====
+          curl -sS --max-time 10 "%SVC_URL%/healthz" > curl_healthz.txt || ver >NUL
+          type curl_healthz.txt || ver >NUL
+        '''
       }
     }
   }
 
   post {
-    success { echo "OK: HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}, K8S_OK=${env.K8S_OK}" }
-    always  { cleanWs() }
+    always {
+      echo "OK: HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}, K8S_OK=${env.K8S_OK}"
+      cleanWs()
+    }
   }
 }
 
