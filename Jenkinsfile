@@ -86,7 +86,7 @@ pipeline {
             } else if (!(vals =~ /(?m)^\s*image:/)) {
               vals += "\nimage:\n  tag: ${env.GIT_SHA}\n"
             }
-            // עדכון ה־repository
+            // עדכון ה-repository
             if (vals =~ /(?m)^\s*repository:\s*.+/) {
               vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
             } else if (vals =~ /(?m)^\s*image:\s*$/) {
@@ -141,9 +141,9 @@ pipeline {
             if not exist "docs" mkdir "docs"
             popd
 
-            for %%f in (.release\\*.tgz) do copy /y "%%f" ".ghp\\docs\\"
+            for %%f in (.release\*.tgz) do copy /y "%%f" ".ghp\docs\"
             pushd .ghp
-            helm repo index docs --merge docs\\index.yaml
+            helm repo index docs --merge docs\index.yaml
             git add docs
             git commit -m "publish chart %GIT_SHA%" || ver >NUL
             git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" push origin gh-pages
@@ -165,7 +165,7 @@ pipeline {
         withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat '''
             docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-            docker build -f App\\Dockerfile -t %IMAGE_REPO%:%GIT_SHA% App
+            docker build -f App\Dockerfile -t %IMAGE_REPO%:%GIT_SHA% App
             docker push %IMAGE_REPO%:%GIT_SHA%
           '''
         }
@@ -231,4 +231,3 @@ pipeline {
     }
   }
 }
-
