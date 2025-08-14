@@ -1,43 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Values.app.name }}
+  name: {{ include "flaskapp.fullname" . }}
   labels:
-    app: {{ .Values.app.name }}
+    app.kubernetes.io/name: {{ include "flaskapp.name" . }}
+    helm.sh/chart: {{ include "flaskapp.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  replicas: {{ .Values.replicaCount | default 1 }}
-  strategy:
-    type: {{ .Values.strategyType | default "Recreate" }}
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ .Values.app.name }}
+      app.kubernetes.io/name: {{ include "flaskapp.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
       labels:
-        app: {{ .Values.app.name }}
+        app.kubernetes.io/name: {{ include "flaskapp.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
-      terminationGracePeriodSeconds: {{ .Values.terminationGraceSeconds | default 10 }}
       containers:
-        - name: {{ .Values.app.name }}
+        - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
-            - name: http
-              containerPort: {{ .Values.service.port | default 5000 }}
-          readinessProbe:
-            httpGet:
-              path: {{ .Values.healthPath | default "/health" }}
-              port: http
-            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds | default 5 }}
-            periodSeconds: {{ .Values.readinessProbe.periodSeconds | default 5 }}
-            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds | default 2 }}
-            failureThreshold: {{ .Values.readinessProbe.failureThreshold | default 6 }}
-          livenessProbe:
-            httpGet:
-              path: {{ .Values.healthPath | default "/health" }}
-              port: http
-            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds | default 10 }}
-            periodSeconds: {{ .Values.livenessProbe.periodSeconds | default 10 }}
-            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds | default 2 }}
-            failureThreshold: {{ .Values.livenessProbe.failureThreshold | default 3 }}
-
+            - containerPort: {{ .Values.containerPort }}
