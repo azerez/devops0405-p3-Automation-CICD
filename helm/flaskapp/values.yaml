@@ -21,3 +21,4 @@ resources: {}
 # נתיב בריאות - תואם ל-curl בפייפליין; אם אין /health אפשר לשנות ל'/' ולהתאים גם בפייפליין
 healthPath: /health
 
+# trigger Thu Aug 14 19:10:54 JDT 2025
