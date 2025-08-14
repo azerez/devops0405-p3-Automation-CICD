@@ -59,7 +59,7 @@ pipeline {
       steps {
         script {
           // Compute safe diff base (merge-base with origin/<branch>, fallback to HEAD~1)
-          bat label: 'compute diff', script: """
+          bat label: 'compute diff', script: '''
 @echo off
 setlocal enabledelayedexpansion
 git fetch origin %BRANCH% 1>NUL 2>NUL
@@ -72,13 +72,13 @@ if "!ORIG!"=="" (
 )
 git diff --name-only !BASE! !HEAD! > diff.txt
 endlocal
-"""
+'''
           def diff = fileExists('diff.txt') ? readFile('diff.txt') : ''
           echo "Changed files:\n${diff}"
           def changed = diff?.readLines()?.any { it.startsWith("${CHART_DIR}/") || it.startsWith('helm/') } ?: false
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
-[O        }
+        }
       }
     }
 
@@ -245,11 +245,11 @@ if exist tests (
     stage('Build & Push Docker') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
-          bat """
+          bat '''
 docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
 docker build -f App/Dockerfile -t ${DOCKER_IMAGE}:${env.GIT_SHA} App
 docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
-"""
+'''
         }
       }
     }
