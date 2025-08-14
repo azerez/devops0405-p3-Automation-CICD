@@ -6,20 +6,18 @@ replicaCount: 1
 image:
   repository: erezazu/devops0405-docker-flask-app
   pullPolicy: IfNotPresent
-  # הפייפליין מעדכן אוטומטית ל-SHA הנוכחי
+  # The pipeline will override this with the current commit SHA automatically
   tag: "latest"
 
 service:
-  # חשוב: NodePort כדי שנוכל לקרוא מהפייפליין (Smoke Test)
+  # NodePort so we can run a smoke test from the pipeline
   type: NodePort
   port: 5000
-  # אפשר להשאיר ריק כדי ש-K8s יקצה אוטומטית, או להגדיר מספר אם רוצים
+  # Leave null for automatic allocation or set explicitly if needed
   nodePort: null
 
 resources: {}
 
-# נתיב בריאות - תואם ל-curl בפייפליין; אם אין /health אפשר לשנות ל'/' ולהתאים גם בפייפליין
+# Health path for readiness/liveness probes and smoke tests
 healthPath: /health
 
-# trigger Thu Aug 14 19:10:54 JDT 2025
-# trigger Thu Aug 14 19:18:19 JDT 2025
