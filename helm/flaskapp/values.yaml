@@ -6,20 +6,32 @@ replicaCount: 1
 image:
   repository: erezazu/devops0405-docker-flask-app
   pullPolicy: IfNotPresent
-  # The pipeline will override this with the current commit SHA automatically
-  tag: "latest"
+  tag: "latest"   # הפייפליין יחליף ל-SHA
 
 service:
-  # NodePort so we can run a smoke test from the pipeline
   type: NodePort
   port: 5000
-  # Leave null for automatic allocation or set explicitly if needed
-  nodePort: null
+  nodePort: null  # אפשר להשאיר null כדי ש-K8s יקצה פורט
 
-resources: {}
+# אסטרטגיית דיפלוי – עבור רפליקה אחת עדיף Recreate
+strategyType: Recreate
 
-# Health path for readiness/liveness probes and smoke tests
+# הגדרות בריאות סבירות לאפליקציית Flask פשוטה
 healthPath: /health
 
-# trigger Thu Aug 14 19:28:53 JDT 2025
-# trigger Thu Aug 14 23:14:18 JDT 2025
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 6
+
+livenessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# כמה זמן מותר לפוד להיסגר לפני שה-kubelet “קורע” אותו
+terminationGraceSeconds: 10
+
+# trigger Thu Aug 14 23:24:33 JDT 2025
