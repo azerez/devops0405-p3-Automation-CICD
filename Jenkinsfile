@@ -1,19 +1,21 @@
 /*
   Jenkinsfile — Windows agent (cmd/bat). English-only comments inside.
 
-  What this pipeline does (matches the assignment):
+  What this pipeline does (matches the assignment + avoids manual kubeconfig updates):
   - Checkout → Init (capture SHA)
   - Detect Helm changes: run bump/package/publish ONLY when something under "helm/" changed
   - Helm lint
   - Test (quick app checks)  ← satisfies Build/Test/Deploy requirement
   - Build & Push Docker image (tag = GIT_SHA) from App/Dockerfile
+  - Fetch kubeconfig from minikube dynamically (no Jenkins credentials needed)
+  - K8s Preflight (prints cluster-info; gates Deploy/Smoke)
   - Deploy to minikube with Helm (image tag = GIT_SHA)
   - Smoke Test (/health)
   - Archive packaged charts (.tgz)
 
   Notes:
   - gh-pages publishing uses a worktree and merges index.yaml.
-  - If you prefer a single immutable tag like v1 instead of SHA, we can change two lines later.
+  - If you prefer a single immutable tag like "v1" instead of SHA, we can switch two lines later.
 */
 
 pipeline {
@@ -31,6 +33,7 @@ pipeline {
     RELEASE_DIR   = '.release'
     DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
     K8S_NAMESPACE = 'default'
+    K8S_OK        = 'false'   // set true in Preflight when cluster is reachable
   }
 
   stages {
@@ -75,7 +78,7 @@ endlocal
           def changed = diff?.readLines()?.any { it.startsWith("${CHART_DIR}/") || it.startsWith('helm/') } ?: false
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
-        }
+[O        }
       }
     }
 
@@ -218,7 +221,7 @@ endlocal
       }
     }
 
-    // TEST stage (lightweight checks)
+    // ------ TEST stage (quick checks) ------
     stage('Test (App quick checks)') {
       steps {
         bat '''
@@ -237,6 +240,7 @@ if exist tests (
 '''
       }
     }
+    // --------------------------------------
 
     stage('Build & Push Docker') {
       steps {
@@ -250,21 +254,56 @@ docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
       }
     }
 
-    stage('Deploy to minikube') {
+    // === NEW: fetch a fresh kubeconfig from minikube every run ===
+    stage('Fetch kubeconfig from minikube') {
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          bat """
+        bat '''
+@echo off
+REM Export a fresh kubeconfig from minikube into the workspace
+minikube -p minikube kubectl -- config view --raw > kubeconfig
+if errorlevel 1 (
+  echo WARN: failed to export kubeconfig from minikube
+)
+'''
+        script {
+          // point kubectl/helm at the file we just wrote
+          env.KUBECONFIG = "${pwd()}\\kubeconfig"
+          echo "KUBECONFIG set to ${env.KUBECONFIG}"
+        }
+      }
+    }
+
+    // === NEW: Preflight so we only deploy if the cluster is reachable ===
+    stage('K8s Preflight') {
+      steps {
+        script {
+          def status = bat(returnStatus: true, script: '''
+@echo off
+kubectl config current-context
+kubectl cluster-info
+kubectl get nodes
+''')
+          env.K8S_OK = (status == 0) ? 'true' : 'false'
+          echo "K8S_OK = ${env.K8S_OK}"
+        }
+      }
+    }
+
+    stage('Deploy to minikube') {
+      when { expression { env.K8S_OK == 'true' } }
+      steps {
+        bat """
 helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
   --namespace ${K8S_NAMESPACE} --create-namespace ^
   --set image.repository=${DOCKER_IMAGE} ^
   --set image.tag=${env.GIT_SHA} ^
   --set image.pullPolicy=IfNotPresent
 """
-        }
       }
     }
 
     stage('Smoke Test') {
+      when { expression { env.K8S_OK == 'true' } }
       steps {
         bat '''
 @echo off
@@ -278,7 +317,7 @@ curl -s http://%IP%:%NP%/health
   }
 
   post {
-    success { echo "OK: HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}" }
+    success { echo "OK: HELM_CHANGED=${env.HELM_CHANGED}, SHA=${env.GIT_SHA}, K8S_OK=${env.K8S_OK}" }
     always  { cleanWs() }
   }
 }
