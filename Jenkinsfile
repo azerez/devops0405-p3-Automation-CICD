@@ -32,13 +32,9 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          // אילו קבצים השתנו בקומיט האחרון
           def diff = bat(returnStdout: true, script: 'git diff --name-only HEAD~1..HEAD || ver >NUL').trim()
           def changed = diff.readLines().any { it.replace('\\','/').startsWith("${env.CHART_DIR}/") }
-
-          // fallback: אם diff ריק (למשל ריצה ידנית), נדרוש שקובץ values קיים
           if (!changed) { changed = fileExists("${env.CHART_DIR}/values.yaml") }
-
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "Changed files:\n${diff}\n"
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
@@ -60,14 +56,12 @@ pipeline {
           def chartPath  = "${env.CHART_DIR}/Chart.yaml"
           def valuesPath = "${env.CHART_DIR}/values.yaml"
           def chart = readFile(file: chartPath, encoding: 'UTF-8')
-
           def m = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
           if (!m.find()) { error "Cannot find 'version:' in ${chartPath}" }
           def major = m.group(1) as int
           def minor = m.group(2) as int
           def patch = (m.group(3) as int) + 1
           def newVersion = "${major}.${minor}.${patch}"
-
           chart = chart.replaceFirst(/(?m)^version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVersion}")
           if (chart =~ /(?m)^appVersion:/) {
             chart = chart.replaceFirst(/(?m)^appVersion:\s*.*/, "appVersion: \"${env.GIT_SHA}\"")
@@ -75,10 +69,8 @@ pipeline {
             chart += "\nappVersion: \"${env.GIT_SHA}\"\n"
           }
           writeFile file: chartPath, text: chart, encoding: 'UTF-8'
-
           if (fileExists(valuesPath)) {
             def vals = readFile(file: valuesPath, encoding: 'UTF-8')
-            // עדכון תג התמונה
             if (vals =~ /(?m)^\s*tag:\s*.+/) {
               vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: ${env.GIT_SHA}")
             } else if (vals =~ /(?m)^\s*image:\s*$/) {
@@ -86,7 +78,6 @@ pipeline {
             } else if (!(vals =~ /(?m)^\s*image:/)) {
               vals += "\nimage:\n  tag: ${env.GIT_SHA}\n"
             }
-            // עדכון ה-repository
             if (vals =~ /(?m)^\s*repository:\s*.+/) {
               vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
             } else if (vals =~ /(?m)^\s*image:\s*$/) {
@@ -96,7 +87,6 @@ pipeline {
             }
             writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
           }
-
           echo "Chart and values updated for ${env.GIT_SHA} -> ${newVersion}"
         }
       }
@@ -116,7 +106,7 @@ pipeline {
     stage('Publish to gh-pages') {
       when { expression { env.HELM_CHANGED == 'true' } }
       environment {
-        GH_EMAIL = 'ci-bot@example.com'    // עדכן אם תרצה
+        GH_EMAIL = 'ci-bot@example.com'
         GH_NAME  = 'ci-bot'
         REPO_URL = 'https://github.com/azerez/devops0405-p3-Automation-CICD.git'
       }
@@ -141,9 +131,15 @@ pipeline {
             if not exist "docs" mkdir "docs"
             popd
 
-            for %%f in (.release\*.tgz) do copy /y "%%f" ".ghp\docs\"
+            rem Copy chart packages using xcopy to avoid FOR/backslash parsing issues
+            xcopy /Y /I ".release\\*.tgz" ".ghp\\docs\\" >NUL
+
             pushd .ghp
-            helm repo index docs --merge docs\index.yaml
+            if exist docs\\index.yaml (
+              helm repo index docs --merge docs\\index.yaml
+            ) else (
+              helm repo index docs
+            )
             git add docs
             git commit -m "publish chart %GIT_SHA%" || ver >NUL
             git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" push origin gh-pages
@@ -165,7 +161,7 @@ pipeline {
         withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat '''
             docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-            docker build -f App\Dockerfile -t %IMAGE_REPO%:%GIT_SHA% App
+            docker build -f App\\Dockerfile -t %IMAGE_REPO%:%GIT_SHA% App
             docker push %IMAGE_REPO%:%GIT_SHA%
           '''
         }
