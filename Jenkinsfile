@@ -1,3 +1,4 @@
+
 /*
   Jenkinsfile — DevOps Course Project (Phase 3)
   -------------------------------------------------
@@ -102,12 +103,18 @@ pipeline {
         }
       }
       steps {
-        // Simple PATCH bump: X.Y.Z -> X.Y.(Z+1). Also keeps appVersion aligned.
+        // IMPORTANT: use double quotes around $CHART_FILE so ${HELM_CHART_DIR} expands!
         sh '''
           set -e
-          CHART_FILE='${HELM_CHART_DIR}/Chart.yaml'
+          CHART_FILE="${HELM_CHART_DIR}/Chart.yaml"
+          if [ ! -f "$CHART_FILE" ]; then
+            echo "ERROR: Chart file not found at $CHART_FILE"
+            exit 2
+          fi
+
           CURR=$(grep '^version:' "$CHART_FILE" | awk '{print $2}')
           IFS=. read -r MA mi pa <<<"$CURR"
+          : "${pa:=0}"
           pa=$((pa+1))
           NEW="${MA}.${mi}.${pa}"
 
@@ -140,7 +147,7 @@ pipeline {
                                           usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
           sh '''
             set -e
-            CHART_FILE='${HELM_CHART_DIR}/Chart.yaml'
+            CHART_FILE="${HELM_CHART_DIR}/Chart.yaml"
 
             # Commit only if the chart file actually changed
             if git diff --quiet -- "$CHART_FILE"; then
@@ -218,12 +225,15 @@ pipeline {
             export KUBECONFIG="${KCFG}"
 
             # If the cluster is unreachable (e.g., Minikube is stopped), skip deploy gracefully.
-            if ! kubectl version --short >/dev/null 2 &> /dev/null; then
+            if ! kubectl version --short >/dev/null 2>&1; then
               echo "Kubernetes cluster not reachable — skipping deploy."
               exit 0
             fi
 
-            helm upgrade --install flaskapp ${HELM_CHART_DIR}               --namespace ${NAMESPACE} --create-namespace               --set image.repository=${REGISTRY}/${IMAGE_REPO}               --set image.tag=${GIT_SHA}
+            helm upgrade --install flaskapp ${HELM_CHART_DIR} \
+              --namespace ${NAMESPACE} --create-namespace \
+              --set image.repository=${REGISTRY}/${IMAGE_REPO} \
+              --set image.tag=${GIT_SHA}
           '''
         }
       }
