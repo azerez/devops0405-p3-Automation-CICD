@@ -3,13 +3,13 @@
 
   Pipeline summary:
   - Checkout → Init (capture SHA)
-  - Detect Helm changes: bump/package/publish ONLY if something under "helm/" changed
+  - Detect Helm changes robustly (HEAD^..HEAD → HEAD~1..HEAD → show HEAD)
   - Helm lint
   - Test (quick app checks)
   - Build & Push Docker (tag = GIT_SHA)
   - Fetch kubeconfig from minikube dynamically (no static Jenkins creds)
-  - K8s Preflight (prints cluster-info; gates Deploy/Smoke)
-  - Deploy to minikube with Helm (image tag = GIT_SHA)
+  - K8s Preflight (gates Deploy/Smoke)
+  - Deploy to minikube (image tag = GIT_SHA)
   - Smoke Test (/health)
   - Archive packaged charts (.tgz)
 */
@@ -29,7 +29,7 @@ pipeline {
     RELEASE_DIR   = '.release'
     DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
     K8S_NAMESPACE = 'default'
-    K8S_OK        = 'false'   // set to true in Preflight if cluster reachable
+    K8S_OK        = 'false'
   }
 
   stages {
@@ -41,7 +41,7 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // Keep last non-empty line (bat echoes the command)
+          // On Windows bat echoes the command; keep only the last non-empty line
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
           def lines = out.readLines().collect { it?.trim() }.findAll { it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
@@ -54,23 +54,44 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          bat label: 'compute diff', script: '''
+          // Robust diff: try HEAD^..HEAD → HEAD~1..HEAD → last commit files
+          bat(label: 'compose diff', script: '''
 @echo off
 setlocal enabledelayedexpansion
-git fetch origin %BRANCH% 1>NUL 2>NUL
-for /f %%i in ('git rev-parse HEAD') do set HEAD=%%i
-for /f %%i in ('git rev-parse --verify origin/%BRANCH% 2^>NUL') do set ORIG=%%i
-if "!ORIG!"=="" (
-  for /f %%i in ('git rev-parse HEAD~1 2^>NUL') do set BASE=%%i
+
+REM clear any previous diff
+del /f /q diff.txt 1>NUL 2>NUL
+
+REM try HEAD^..HEAD
+git rev-parse HEAD^ 1>NUL 2>NUL
+if %errorlevel%==0 (
+  git diff --name-only HEAD^ HEAD > diff.txt
 ) else (
-  for /f %%i in ('git merge-base HEAD origin/%BRANCH%') do set BASE=%%i
+  REM try HEAD~1..HEAD
+  git rev-parse HEAD~1 1>NUL 2>NUL
+  if %errorlevel%==0 (
+    git diff --name-only HEAD~1 HEAD > diff.txt
+  ) else (
+    REM fallback: list files in the last commit
+    git show --pretty="" --name-only HEAD > diff.txt
+  )
 )
-git diff --name-only !BASE! !HEAD! > diff.txt
+
+type diff.txt
 endlocal
-'''
+''')
+
           def diff = fileExists('diff.txt') ? readFile('diff.txt') : ''
           echo "Changed files:\n${diff}"
-          def changed = diff?.readLines()?.any { it.startsWith("${CHART_DIR}/") || it.startsWith('helm/') } ?: false
+
+          // consider any change under helm/ or specifically under CHART_DIR
+          def changed = diff?.readLines()?.any { p ->
+            p.startsWith("${CHART_DIR}/") ||
+            p.startsWith('helm/') ||
+            p.replace('\\','/').startsWith("${CHART_DIR}/") ||
+            p.replace('\\','/').startsWith('helm/')
+          } ?: false
+
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
         }
@@ -78,11 +99,10 @@ endlocal
     }
 
     stage('Helm Lint') {
-      steps {
-        dir("${CHART_DIR}") { bat 'helm lint .' }
-      }
+      steps { dir("${CHART_DIR}") { bat 'helm lint .' } }
     }
 
+    // bump only when Helm changed
     stage('Bump Chart Version (patch)') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
@@ -104,7 +124,7 @@ endlocal
             echo "WARN: version not found in Chart.yaml – leaving as-is"
           }
 
-          // appVersion -> SHA (append if missing)
+          // set appVersion to current SHA (append if missing)
           int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
           if (aIdx >= 0) chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
           else chartLines << "appVersion: ${env.GIT_SHA}"
@@ -169,10 +189,7 @@ endlocal
 
     stage('Publish to gh-pages') {
       when {
-        allOf {
-          branch 'main'
-          expression { env.HELM_CHANGED == 'true' }
-        }
+        allOf { branch 'main'; expression { env.HELM_CHANGED == 'true' } }
       }
       steps {
         withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
@@ -247,11 +264,7 @@ docker push %DOCKER_IMAGE%:%GIT_SHA%
       steps {
         bat '''
 @echo off
-REM Export a fresh kubeconfig from minikube into the workspace
 minikube -p minikube kubectl -- config view --raw > kubeconfig
-if errorlevel 1 (
-  echo WARN: failed to export kubeconfig from minikube
-)
 '''
         script {
           env.KUBECONFIG = "${pwd()}\\kubeconfig"
@@ -263,6 +276,7 @@ if errorlevel 1 (
     stage('K8s Preflight') {
       steps {
         script {
+          // return code of the last command decides success; we also print context info
           def status = bat(returnStatus: true, script: '''
 @echo off
 kubectl config current-context
