@@ -1,21 +1,17 @@
 /*
   Jenkinsfile — Windows agent (cmd/bat). English-only comments inside.
 
-  What this pipeline does (matches the assignment + avoids manual kubeconfig updates):
+  Pipeline summary:
   - Checkout → Init (capture SHA)
-  - Detect Helm changes: run bump/package/publish ONLY when something under "helm/" changed
+  - Detect Helm changes: bump/package/publish ONLY if something under "helm/" changed
   - Helm lint
-  - Test (quick app checks)  ← satisfies Build/Test/Deploy requirement
-  - Build & Push Docker image (tag = GIT_SHA) from App/Dockerfile
-  - Fetch kubeconfig from minikube dynamically (no Jenkins credentials needed)
+  - Test (quick app checks)
+  - Build & Push Docker (tag = GIT_SHA)
+  - Fetch kubeconfig from minikube dynamically (no static Jenkins creds)
   - K8s Preflight (prints cluster-info; gates Deploy/Smoke)
   - Deploy to minikube with Helm (image tag = GIT_SHA)
   - Smoke Test (/health)
   - Archive packaged charts (.tgz)
-
-  Notes:
-  - gh-pages publishing uses a worktree and merges index.yaml.
-  - If you prefer a single immutable tag like "v1" instead of SHA, we can switch two lines later.
 */
 
 pipeline {
@@ -33,7 +29,7 @@ pipeline {
     RELEASE_DIR   = '.release'
     DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
     K8S_NAMESPACE = 'default'
-    K8S_OK        = 'false'   // set true in Preflight when cluster is reachable
+    K8S_OK        = 'false'   // set to true in Preflight if cluster reachable
   }
 
   stages {
@@ -45,7 +41,7 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // On Windows, bat echoes the command; keep only the last non-empty line
+          // Keep last non-empty line (bat echoes the command)
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
           def lines = out.readLines().collect { it?.trim() }.findAll { it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
@@ -58,7 +54,6 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          // Compute safe diff base (merge-base with origin/<branch>, fallback to HEAD~1)
           bat label: 'compute diff', script: '''
 @echo off
 setlocal enabledelayedexpansion
@@ -88,7 +83,6 @@ endlocal
       }
     }
 
-    // Safe YAML bump (no external libs). Runs only when Helm changed.
     stage('Bump Chart Version (patch)') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
@@ -135,7 +129,6 @@ endlocal
               out << line; return
             }
             if (inImage) {
-              // leaving the image: block → ensure keys exist, then fall through
               if (trimmed && leadLen <= imageIndent) {
                 def sp = ' ' * (imageIndent + 2)
                 if (!repoSet) out << "${sp}repository: ${DOCKER_IMAGE}"
@@ -174,7 +167,6 @@ endlocal
       }
     }
 
-    // Publish charts to gh-pages only on main AND only when Helm changed
     stage('Publish to gh-pages') {
       when {
         allOf {
@@ -221,12 +213,10 @@ endlocal
       }
     }
 
-    // ------ TEST stage (quick checks) ------
     stage('Test (App quick checks)') {
       steps {
         bat '''
 @echo off
-REM Best-effort: if Python exists, try simple checks; otherwise skip without failing.
 where python >NUL 2>NUL || goto :eof
 if exist requirements.txt (
   python -m pip install --no-cache-dir -r requirements.txt 1>NUL
@@ -240,21 +230,19 @@ if exist tests (
 '''
       }
     }
-    // --------------------------------------
 
     stage('Build & Push Docker') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
           bat '''
 docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-docker build -f App/Dockerfile -t ${DOCKER_IMAGE}:${env.GIT_SHA} App
-docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
+docker build -f App/Dockerfile -t %DOCKER_IMAGE%:%GIT_SHA% App
+docker push %DOCKER_IMAGE%:%GIT_SHA%
 '''
         }
       }
     }
 
-    // === NEW: fetch a fresh kubeconfig from minikube every run ===
     stage('Fetch kubeconfig from minikube') {
       steps {
         bat '''
@@ -266,14 +254,12 @@ if errorlevel 1 (
 )
 '''
         script {
-          // point kubectl/helm at the file we just wrote
           env.KUBECONFIG = "${pwd()}\\kubeconfig"
           echo "KUBECONFIG set to ${env.KUBECONFIG}"
         }
       }
     }
 
-    // === NEW: Preflight so we only deploy if the cluster is reachable ===
     stage('K8s Preflight') {
       steps {
         script {
@@ -292,13 +278,13 @@ kubectl get nodes
     stage('Deploy to minikube') {
       when { expression { env.K8S_OK == 'true' } }
       steps {
-        bat """
-helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
-  --namespace ${K8S_NAMESPACE} --create-namespace ^
-  --set image.repository=${DOCKER_IMAGE} ^
-  --set image.tag=${env.GIT_SHA} ^
+        bat '''
+helm upgrade --install %APP_NAME% %CHART_DIR% ^
+  --namespace %K8S_NAMESPACE% --create-namespace ^
+  --set image.repository=%DOCKER_IMAGE% ^
+  --set image.tag=%GIT_SHA% ^
   --set image.pullPolicy=IfNotPresent
-"""
+'''
       }
     }
 
@@ -307,8 +293,8 @@ helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
       steps {
         bat '''
 @echo off
-for /f "tokens=*" %%i in ('kubectl -n default rollout status deploy/flaskapp --timeout=120s') do echo %%i
-for /f "tokens=*" %%p in ('kubectl -n default get svc flaskapp -o jsonpath="{.spec.ports[0].nodePort}"') do set NP=%%p
+for /f "tokens=*" %%i in ('kubectl -n %K8S_NAMESPACE% rollout status deploy/%APP_NAME% --timeout=120s') do echo %%i
+for /f "tokens=*" %%p in ('kubectl -n %K8S_NAMESPACE% get svc %APP_NAME% -o jsonpath="{.spec.ports[0].nodePort}"') do set NP=%%p
 for /f "tokens=*" %%i in ('minikube ip') do set IP=%%i
 curl -s http://%IP%:%NP%/health
 '''
