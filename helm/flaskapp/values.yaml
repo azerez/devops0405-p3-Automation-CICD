@@ -1,103 +1,23 @@
-# Default values for flaskapp.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
-
 app:
   name: flaskapp
 
-# This will set the replicaset count
 replicaCount: 1
 
-# This sets the container image
 image:
   repository: erezazu/devops0405-docker-flask-app
   pullPolicy: IfNotPresent
-  tag: "90feb41"
+  # הפייפליין מעדכן אוטומטית ל-SHA הנוכחי
+  tag: "latest"
 
-# Secrets for pulling an image from a private registry
-imagePullSecrets: []
-
-# Optional name overrides (not used by the minimal templates)
-nameOverride: ""
-fullnameOverride: ""
-
-# ServiceAccount block (not used by the minimal templates)
-serviceAccount:
-  create: true
-  automount: true
-  annotations: {}
-  name: ""
-
-# Pod annotations/labels (not used by the minimal templates)
-podAnnotations: {}
-podLabels: {}
-
-podSecurityContext: {}
-securityContext: {}
-
-# Service configuration
 service:
-  type: ClusterIP
+  # חשוב: NodePort כדי שנוכל לקרוא מהפייפליין (Smoke Test)
+  type: NodePort
   port: 5000
+  # אפשר להשאיר ריק כדי ש-K8s יקצה אוטומטית, או להגדיר מספר אם רוצים
+  nodePort: null
 
-# Ingress (not used by the minimal templates)
-ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-  hosts:
-    - host: chart-example.local
-      paths:
-        - path: /
-          pathType: ImplementationSpecific
-  tls: []
-
-# Resources (optional, not used unless you wire them in the templates)
 resources: {}
 
-# Probes (defined here but not used by the minimal templates)
-livenessProbe:
-  httpGet:
-    path: /
-    port: http
-readinessProbe:
-  httpGet:
-    path: /
-    port: http
+# נתיב בריאות - תואם ל-curl בפייפליין; אם אין /health אפשר לשנות ל'/' ולהתאים גם בפייפליין
+healthPath: /health
 
-# Autoscaling (not used by the minimal templates)
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 100
-  targetCPUUtilizationPercentage: 80
-
-# Extra volumes/volumeMounts (not used by the minimal templates)
-volumes: []
-volumeMounts: []
-
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
-# trigger 2
-# trigger Thu Aug 14 12:26:14 JDT 2025
-# trigger Thu Aug 14 12:35:45 JDT 2025
-# trigger Thu Aug 14 12:42:41 JDT 2025
-# trigger Thu Aug 14 12:55:11 JDT 2025
-# trigger Thu Aug 14 13:58:51 JDT 2025
-# trigger Thu Aug 14 14:27:50 JDT 2025
-# trigger Thu Aug 14 14:41:05 JDT 2025
-# trigger Thu Aug 14 17:15:48 JDT 2025
-# trigger Thu Aug 14 17:19:11 JDT 2025
-# trigger Thu Aug 14 18:27:19 JDT 2025
-# trigger Thu Aug 14 18:31:02 JDT 2025
-# trigger Thu Aug 14 18:33:31 JDT 2025
-# trigger Thu Aug 14 18:36:00 JDT 2025
-# trigger Thu Aug 14 18:37:16 JDT 2025
-# trigger Thu Aug 14 18:42:28 JDT 2025
-# trigger Thu Aug 14 18:43:51 JDT 2025
-# trigger Thu Aug 14 18:48:41 JDT 2025
-# trigger Thu Aug 14 18:50:09 JDT 2025
-# trigger Thu Aug 14 18:51:02 JDT 2025
-# trigger Thu Aug 14 18:56:10 JDT 2025
