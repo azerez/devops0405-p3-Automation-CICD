@@ -13,7 +13,7 @@ pipeline {
 
     HELM_CHART_DIR    = "helm/flaskapp"
     HELM_PACKAGE_DIR  = "helm/dist"
-    NAMESPACE         = "dev"            // keep dev namespace
+    NAMESPACE         = "dev"
     BUMP_HELM_VERSION = "true"
   }
 
@@ -30,7 +30,6 @@ pipeline {
         sh '''
           echo "Building image: ${IMAGE_REPO}:${IMAGE_TAG}"
           docker build -f App/Dockerfile -t ${IMAGE_REPO}:${IMAGE_TAG} App
-          # also tag latest for developer convenience
           docker tag ${IMAGE_REPO}:${IMAGE_TAG} ${IMAGE_REPO}:latest
         '''
       }
@@ -44,7 +43,7 @@ pipeline {
 
     stage('Push Docker Image') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DU', passwordVariable: 'DP')]) {
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DU', passwordVariable: 'DP')]) {
           sh '''
             echo "${DP}" | docker login -u "${DU}" --password-stdin ${REGISTRY}
             docker push ${IMAGE_REPO}:${IMAGE_TAG}
@@ -76,7 +75,6 @@ EOF
           pa=$((pa+1))
           NEW="${MA}.${mi}.${pa}"
 
-          # bump version and appVersion together (simple)
           sed -i "s/^version:.*/version: ${NEW}/" "${CHART_FILE}"
           if grep -q '^appVersion:' "${CHART_FILE}"; then
             sed -i "s/^appVersion:.*/appVersion: ${NEW}/" "${CHART_FILE}"
@@ -105,7 +103,7 @@ EOF
     stage('Helm Publish (OCI) - only if helm/ changed') {
       when { changeset "helm/**" }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DU', passwordVariable: 'DP')]) {
+        withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DU', passwordVariable: 'DP')]) {
           sh '''
             set -e
             helm registry login -u "${DU}" -p "${DP}" registry-1.docker.io
@@ -120,10 +118,9 @@ EOF
     stage('Deploy to Kubernetes (main only)') {
       when { anyOf { branch 'main'; branch 'master' } }
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig-dev', variable: 'KCFG')]) {
+        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
           sh '''
             export KUBECONFIG="${KCFG}"
-            # IMPORTANT: deploy with immutable SHA tag (not 'latest')
             helm upgrade --install ${APP_NAME} ${HELM_CHART_DIR}               --namespace ${NAMESPACE} --create-namespace               --set image.repository=${IMAGE_REPO}               --set image.tag=${IMAGE_TAG}
           '''
         }
