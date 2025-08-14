@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'node01' } // עדכן אם שם ה-agent שונה
+  agent { label 'node01' } // עדכן לפי שם ה-agent שלך
 
   options {
     timestamps()
@@ -7,18 +7,16 @@ pipeline {
   }
 
   environment {
-    IMAGE_REPO = 'erezazu/devops0405-docker-flask-app'
-    CHART_DIR  = 'helm/flaskapp'
-    RELEASE    = 'flaskapp'
+    IMAGE_REPO       = 'erezazu/devops0405-docker-flask-app'
+    CHART_DIR        = 'helm/flaskapp'
+    RELEASE          = 'flaskapp'
     MINIKUBE_PROFILE = 'minikube'
   }
 
   stages {
 
     stage('Checkout SCM') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Init (capture SHA)') {
@@ -34,18 +32,12 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          // מזהה האם יש קבצים ששונו תחת helm/flaskapp
-          def diff = bat(
-            returnStdout: true,
-            script: 'git diff --name-only HEAD~1..HEAD || ver >NUL'
-          ).trim()
-
+          // אילו קבצים השתנו בקומיט האחרון
+          def diff = bat(returnStdout: true, script: 'git diff --name-only HEAD~1..HEAD || ver >NUL').trim()
           def changed = diff.readLines().any { it.replace('\\','/').startsWith("${env.CHART_DIR}/") }
 
-          // fallback: אם אין Diff (למשל ריצה ידנית), בדוק אם values.yaml השתנה היום
-          if (!changed) {
-            changed = fileExists("${env.CHART_DIR}/values.yaml")
-          }
+          // fallback: אם diff ריק (למשל ריצה ידנית), נדרוש שקובץ values קיים
+          if (!changed) { changed = fileExists("${env.CHART_DIR}/values.yaml") }
 
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "Changed files:\n${diff}\n"
@@ -57,9 +49,7 @@ pipeline {
     stage('Helm Lint') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
-        dir("${env.CHART_DIR}") {
-          bat 'helm lint .'
-        }
+        dir("${env.CHART_DIR}") { bat 'helm lint .' }
       }
     }
 
@@ -67,19 +57,17 @@ pipeline {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
         script {
-          // מעלה גרסת chart patch + מעדכן appVersion והתמונה כברירת מחדל ל־GIT_SHA
-          def chartPath = "${env.CHART_DIR}/Chart.yaml"
+          def chartPath  = "${env.CHART_DIR}/Chart.yaml"
           def valuesPath = "${env.CHART_DIR}/values.yaml"
-
           def chart = readFile(file: chartPath, encoding: 'UTF-8')
-          def ver = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
-          if (!ver.find()) {
-            error "Cannot find 'version:' in ${chartPath}"
-          }
-          def major = ver.group(1) as int
-          def minor = ver.group(2) as int
-          def patch = (ver.group(3) as int) + 1
+
+          def m = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
+          if (!m.find()) { error "Cannot find 'version:' in ${chartPath}" }
+          def major = m.group(1) as int
+          def minor = m.group(2) as int
+          def patch = (m.group(3) as int) + 1
           def newVersion = "${major}.${minor}.${patch}"
+
           chart = chart.replaceFirst(/(?m)^version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVersion}")
           if (chart =~ /(?m)^appVersion:/) {
             chart = chart.replaceFirst(/(?m)^appVersion:\s*.*/, "appVersion: \"${env.GIT_SHA}\"")
@@ -88,24 +76,25 @@ pipeline {
           }
           writeFile file: chartPath, text: chart, encoding: 'UTF-8'
 
-          // עדכון תג התמונה ב-values אם יש שדות image.repository/tag
           if (fileExists(valuesPath)) {
             def vals = readFile(file: valuesPath, encoding: 'UTF-8')
-            if (vals =~ /(?m)^\s*image:\s*$/ || vals =~ /(?m)^\s*image:/) {
-              // נסה להחליף tag
-              if (vals =~ /(?m)^\s*tag:\s*.*/) {
-                vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: ${env.GIT_SHA}")
-              } else {
-                vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  tag: ${env.GIT_SHA}")
-              }
-              // נסה להחליף/להגדיר repository
-              if (vals =~ /(?m)^\s*repository:\s*.*/) {
-                vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
-[O              } else {
-                vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  repository: ${env.IMAGE_REPO}")
-              }
-              writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
+            // עדכון תג התמונה
+            if (vals =~ /(?m)^\s*tag:\s*.+/) {
+              vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: ${env.GIT_SHA}")
+            } else if (vals =~ /(?m)^\s*image:\s*$/) {
+              vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  tag: ${env.GIT_SHA}")
+            } else if (!(vals =~ /(?m)^\s*image:/)) {
+              vals += "\nimage:\n  tag: ${env.GIT_SHA}\n"
             }
+            // עדכון ה־repository
+            if (vals =~ /(?m)^\s*repository:\s*.+/) {
+              vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
+            } else if (vals =~ /(?m)^\s*image:\s*$/) {
+              vals = vals.replaceFirst(/(?m)^\s*image:\s*$/, "image:\n  repository: ${env.IMAGE_REPO}")
+            } else if (!(vals =~ /(?m)^\s*image:/)) {
+              vals += "\nimage:\n  repository: ${env.IMAGE_REPO}\n"
+            }
+            writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
           }
 
           echo "Chart and values updated for ${env.GIT_SHA} -> ${newVersion}"
@@ -140,11 +129,12 @@ pipeline {
             git config core.autocrlf false
 
             if not exist ".ghp" mkdir ".ghp"
-            if exist ".ghp\\.git" rmdir /s /q ".ghp\\.git" 2>nul
             pushd .ghp
 
-            git init
-            git remote add origin "%REPO_URL%"
+            if not exist ".git" (
+              git init
+              git remote add origin "%REPO_URL%"
+            )
             git -c http.extraheader="AUTHORIZATION: bearer %GH_TOKEN%" fetch origin gh-pages || ver >NUL
             git checkout -B gh-pages || git checkout --orphan gh-pages
 
@@ -166,9 +156,7 @@ pipeline {
 
     stage('Test (App quick checks)') {
       when { expression { env.HELM_CHANGED == 'true' } }
-      steps {
-        echo 'Quick checks passed (placeholder).'
-      }
+      steps { echo 'Quick checks passed (placeholder).' }
     }
 
     stage('Build & Push Docker') {
