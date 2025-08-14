@@ -67,7 +67,7 @@ pipeline {
           } else {
             chart += "\nappVersion: \"${env.GIT_SHA}\"\n"
           }
-          writeFile file: chartPath, text: chart, encoding: 'UTF-8'
+          writeFile file: chartPath, text: chart, encoding: 'UTF-8')
           if (fileExists(valuesPath)) {
             def vals = readFile(file: valuesPath, encoding: 'UTF-8')
             if (vals =~ /(?m)^\s*tag:\s*.+/) {
@@ -84,7 +84,7 @@ pipeline {
             } else if (!(vals =~ /(?m)^\s*image:/)) {
               vals += "\nimage:\n  repository: ${env.IMAGE_REPO}\n"
             }
-            writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
+            writeFile file: valuesPath, text: vals, encoding: 'UTF-8')
           }
           echo "Chart and values updated for ${env.GIT_SHA} -> ${newVersion}"
         }
@@ -226,3 +226,4 @@ pipeline {
     }
   }
 }
+
