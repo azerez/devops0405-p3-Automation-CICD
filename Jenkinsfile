@@ -55,21 +55,25 @@ pipeline {
           def chartPath  = "${env.CHART_DIR}/Chart.yaml"
           def valuesPath = "${env.CHART_DIR}/values.yaml"
           def chart = readFile(file: chartPath, encoding: 'UTF-8')
+
           def m = (chart =~ /(?m)^version:\s*([0-9]+)\.([0-9]+)\.([0-9]+)/)
           if (!m.find()) { error "Cannot find 'version:' in ${chartPath}" }
           def major = m.group(1) as int
           def minor = m.group(2) as int
           def patch = (m.group(3) as int) + 1
           def newVersion = "${major}.${minor}.${patch}"
+
           chart = chart.replaceFirst(/(?m)^version:\s*[0-9]+\.[0-9]+\.[0-9]+/, "version: ${newVersion}")
           if (chart =~ /(?m)^appVersion:/) {
             chart = chart.replaceFirst(/(?m)^appVersion:\s*.*/, "appVersion: \"${env.GIT_SHA}\"")
           } else {
             chart += "\nappVersion: \"${env.GIT_SHA}\"\n"
           }
-          writeFile file: chartPath, text: chart, encoding: 'UTF-8')
+          writeFile file: chartPath, text: chart, encoding: 'UTF-8'
+
           if (fileExists(valuesPath)) {
             def vals = readFile(file: valuesPath, encoding: 'UTF-8')
+            // עדכון tag
             if (vals =~ /(?m)^\s*tag:\s*.+/) {
               vals = vals.replaceFirst(/(?m)^\s*tag:\s*.*/, "  tag: ${env.GIT_SHA}")
             } else if (vals =~ /(?m)^\s*image:\s*$/) {
@@ -77,6 +81,7 @@ pipeline {
             } else if (!(vals =~ /(?m)^\s*image:/)) {
               vals += "\nimage:\n  tag: ${env.GIT_SHA}\n"
             }
+            // עדכון repository
             if (vals =~ /(?m)^\s*repository:\s*.+/) {
               vals = vals.replaceFirst(/(?m)^\s*repository:\s*.*/, "  repository: ${env.IMAGE_REPO}")
             } else if (vals =~ /(?m)^\s*image:\s*$/) {
@@ -84,8 +89,9 @@ pipeline {
             } else if (!(vals =~ /(?m)^\s*image:/)) {
               vals += "\nimage:\n  repository: ${env.IMAGE_REPO}\n"
             }
-            writeFile file: valuesPath, text: vals, encoding: 'UTF-8')
+            writeFile file: valuesPath, text: vals, encoding: 'UTF-8'
           }
+
           echo "Chart and values updated for ${env.GIT_SHA} -> ${newVersion}"
         }
       }
@@ -226,4 +232,3 @@ pipeline {
     }
   }
 }
-
