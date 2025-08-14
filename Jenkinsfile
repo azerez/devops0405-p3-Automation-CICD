@@ -42,7 +42,7 @@ pipeline {
       steps {
         script {
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-[O          def lines = out.readLines().collect { it?.trim() }.findAll { it }
+          def lines = out.readLines().collect { it?.trim() }.findAll { it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
           echo "GIT_SHA = ${env.GIT_SHA}"
           env.BRANCH = env.BRANCH_NAME ?: 'main'
@@ -53,7 +53,6 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          // Always list files of the last commit (more stable than git diff on some Jenkins setups)
           bat(label: 'list changed files', script: '''
 @echo off
 git log -1 --name-only --pretty=format: > diff.txt
@@ -62,7 +61,6 @@ type diff.txt
           def diff = fileExists('diff.txt') ? readFile('diff.txt') : ''
           echo "Changed files:\n${diff}"
 
-          // Normalize slashes and case, then check paths
           boolean changed = diff.readLines().any { p ->
             def n = (p ?: '').replace('\\','/').toLowerCase()
             n.startsWith('helm/') || n.startsWith("${CHART_DIR.replace('\\','/').toLowerCase()}/")
@@ -77,17 +75,14 @@ type diff.txt
       steps { dir("${CHART_DIR}") { bat 'helm lint .' } }
     }
 
-    // bump only when Helm changed
     stage('Bump Chart Version (patch)') {
       when { expression { env.HELM_CHANGED == 'true' } }
       steps {
         script {
-          // -------- Chart.yaml --------
           def chartPath  = "${CHART_DIR}/Chart.yaml"
           def chartTxt   = readFile(chartPath)
           def chartLines = chartTxt.split(/\r?\n/, -1) as List
 
-          // bump version x.y.z -> x.y.(z+1)
           int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
           if (vIdx >= 0) {
             def cur = chartLines[vIdx].split(':', 2)[1].trim()
@@ -99,14 +94,12 @@ type diff.txt
             echo "WARN: version not found in Chart.yaml – leaving as-is"
           }
 
-          // set appVersion to current SHA (append if missing)
           int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
           if (aIdx >= 0) chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
           else chartLines << "appVersion: ${env.GIT_SHA}"
 
           writeFile file: chartPath, text: chartLines.join('\n')
 
-          // -------- values.yaml --------
           def valuesPath = "${CHART_DIR}/values.yaml"
           def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
           boolean inImage = false
@@ -248,7 +241,6 @@ docker push %DOCKER_IMAGE%:%GIT_SHA%
     stage('K8s Preflight') {
       steps {
         script {
-          // Return 0 only if there is at least one Ready node
           def status = bat(returnStatus: true, script: '''
 @echo off
 kubectl get nodes --no-headers 2>NUL | findstr /C:" Ready "
