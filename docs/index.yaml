@@ -2,13 +2,13 @@ apiVersion: v1
 entries:
   flaskapp:
   - apiVersion: v2
-    appVersion: 0e70d86
-    created: "2025-08-14T10:20:57.3248761+03:00"
+    appVersion: 069a125
+    created: "2025-08-14T12:56:44.5456525+03:00"
     description: Helm chart for the Flaskapp (Phase 3)
-    digest: 59eb717e5c4a635039c09dc65ad53f8ab81361fa0156469a1599779d2caab5bc
+    digest: fd90189cb148d28ed8848353764e257eb3962f6d6d98a625e5fe8a20bd440bf3
     name: flaskapp
     type: application
     urls:
     - flaskapp-0.1.2.tgz
     version: 0.1.2
-generated: "2025-08-14T10:20:57.3120041+03:00"
+generated: "2025-08-14T12:56:44.5371409+03:00"
