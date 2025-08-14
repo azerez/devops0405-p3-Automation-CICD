@@ -1,17 +1,17 @@
 /*
   Jenkinsfile — Windows agent (cmd/bat). English-only comments inside.
 
-  Pipeline summary:
-  - Checkout → Init (capture SHA)
-  - Detect Helm changes robustly (HEAD^..HEAD → HEAD~1..HEAD → show HEAD)
+  What this pipeline does:
+  - Checkout → capture GIT_SHA
+  - Detect Helm changes (robust): uses "git log -1 --name-only"
   - Helm lint
-  - Test (quick app checks)
+  - Test (quick checks)
   - Build & Push Docker (tag = GIT_SHA)
-  - Fetch kubeconfig from minikube dynamically (no static Jenkins creds)
-  - K8s Preflight (gates Deploy/Smoke)
+  - Fetch kubeconfig from minikube (no static secret)
+  - K8s Preflight (node Ready check)
   - Deploy to minikube (image tag = GIT_SHA)
   - Smoke Test (/health)
-  - Archive packaged charts (.tgz)
+  - Archive packaged charts (.tgz) when Helm changed
 */
 
 pipeline {
@@ -41,9 +41,8 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // On Windows bat echoes the command; keep only the last non-empty line
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-          def lines = out.readLines().collect { it?.trim() }.findAll { it }
+[O          def lines = out.readLines().collect { it?.trim() }.findAll { it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
           echo "GIT_SHA = ${env.GIT_SHA}"
           env.BRANCH = env.BRANCH_NAME ?: 'main'
@@ -54,44 +53,20 @@ pipeline {
     stage('Detect Helm Changes') {
       steps {
         script {
-          // Robust diff: try HEAD^..HEAD → HEAD~1..HEAD → last commit files
-          bat(label: 'compose diff', script: '''
+          // Always list files of the last commit (more stable than git diff on some Jenkins setups)
+          bat(label: 'list changed files', script: '''
 @echo off
-setlocal enabledelayedexpansion
-
-REM clear any previous diff
-del /f /q diff.txt 1>NUL 2>NUL
-
-REM try HEAD^..HEAD
-git rev-parse HEAD^ 1>NUL 2>NUL
-if %errorlevel%==0 (
-  git diff --name-only HEAD^ HEAD > diff.txt
-) else (
-  REM try HEAD~1..HEAD
-  git rev-parse HEAD~1 1>NUL 2>NUL
-  if %errorlevel%==0 (
-    git diff --name-only HEAD~1 HEAD > diff.txt
-  ) else (
-    REM fallback: list files in the last commit
-    git show --pretty="" --name-only HEAD > diff.txt
-  )
-)
-
+git log -1 --name-only --pretty=format: > diff.txt
 type diff.txt
-endlocal
 ''')
-
           def diff = fileExists('diff.txt') ? readFile('diff.txt') : ''
           echo "Changed files:\n${diff}"
 
-          // consider any change under helm/ or specifically under CHART_DIR
-          def changed = diff?.readLines()?.any { p ->
-            p.startsWith("${CHART_DIR}/") ||
-            p.startsWith('helm/') ||
-            p.replace('\\','/').startsWith("${CHART_DIR}/") ||
-            p.replace('\\','/').startsWith('helm/')
-          } ?: false
-
+          // Normalize slashes and case, then check paths
+          boolean changed = diff.readLines().any { p ->
+            def n = (p ?: '').replace('\\','/').toLowerCase()
+            n.startsWith('helm/') || n.startsWith("${CHART_DIR.replace('\\','/').toLowerCase()}/")
+          }
           env.HELM_CHANGED = changed ? 'true' : 'false'
           echo "HELM_CHANGED = ${env.HELM_CHANGED}"
         }
@@ -262,10 +237,7 @@ docker push %DOCKER_IMAGE%:%GIT_SHA%
 
     stage('Fetch kubeconfig from minikube') {
       steps {
-        bat '''
-@echo off
-minikube -p minikube kubectl -- config view --raw > kubeconfig
-'''
+        bat 'minikube -p minikube kubectl -- config view --raw > kubeconfig'
         script {
           env.KUBECONFIG = "${pwd()}\\kubeconfig"
           echo "KUBECONFIG set to ${env.KUBECONFIG}"
@@ -276,12 +248,10 @@ minikube -p minikube kubectl -- config view --raw > kubeconfig
     stage('K8s Preflight') {
       steps {
         script {
-          // return code of the last command decides success; we also print context info
+          // Return 0 only if there is at least one Ready node
           def status = bat(returnStatus: true, script: '''
 @echo off
-kubectl config current-context
-kubectl cluster-info
-kubectl get nodes
+kubectl get nodes --no-headers 2>NUL | findstr /C:" Ready "
 ''')
           env.K8S_OK = (status == 0) ? 'true' : 'false'
           echo "K8S_OK = ${env.K8S_OK}"
