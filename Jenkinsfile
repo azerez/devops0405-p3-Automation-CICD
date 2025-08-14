@@ -1,15 +1,22 @@
+/*
+  Jenkinsfile — Windows-friendly (bat + PowerShell), with Helm package publish,
+  Docker build & push, deploy to minikube, and smoke test.
+  Adds a "Sanitize YAML encoding" step to ensure UTF‑8 (no BOM) for Chart.yaml/values.yaml,
+  preventing "invalid trailing UTF-8 octet" in helm package.
+*/
+
 pipeline {
   agent any
 
   options {
     timestamps()
-    skipDefaultCheckout(false)
+    disableConcurrentBuilds()
+    skipDefaultCheckout false
   }
 
   environment {
     APP_NAME      = 'flaskapp'
     CHART_DIR     = 'helm/flaskapp'
-    RELEASE_DIR   = '.release'
     DOCKER_IMAGE  = 'erezazu/devops0405-docker-flask-app'
     K8S_NAMESPACE = 'default'
   }
@@ -23,9 +30,9 @@ pipeline {
     stage('Init (capture SHA)') {
       steps {
         script {
-          // ב-Windows bat מחזיר גם את שורת הפקודה – נשמור רק את השורה האחרונה שאינה ריקה
+          // Use bat to avoid ANSI control chars on Windows; extract last non-empty line
           def out = bat(script: 'git rev-parse --short HEAD', returnStdout: true)
-          def lines = out.readLines().collect { it?.trim() }.findAll { it }
+          def lines = out.readLines().collect{ it?.trim() }.findAll{ it }
           env.GIT_SHA = lines ? lines[-1] : 'unknown'
           echo "GIT_SHA = ${env.GIT_SHA}"
         }
@@ -33,21 +40,17 @@ pipeline {
     }
 
     stage('Helm Lint') {
-      steps {
-        dir("${CHART_DIR}") { bat 'helm lint .' }
-      }
+      steps { dir("${CHART_DIR}") { bat 'helm lint .' } }
     }
 
-    // Bump בטוח לקבצי YAML בלי readYaml/Matcher/repeat
     stage('Bump Chart Version (patch)') {
       steps {
         script {
-          // ---------- Chart.yaml ----------
+          // ---- Chart.yaml: bump version and set appVersion ----
           def chartPath  = "${CHART_DIR}/Chart.yaml"
           def chartTxt   = readFile(chartPath)
           def chartLines = chartTxt.split(/\r?\n/, -1) as List
 
-          // bump version x.y.z -> x.y.(z+1)
           int vIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('version:') }
           if (vIdx >= 0) {
             def cur = chartLines[vIdx].split(':', 2)[1].trim()
@@ -56,19 +59,15 @@ pipeline {
             parts[2] = ((parts[2] as int) + 1).toString()
             chartLines[vIdx] = "version: ${parts.join('.')}"
           } else {
-            echo "WARN: version not found in Chart.yaml – leaving as-is"
+            chartLines << "version: 0.1.0"
           }
 
-          // appVersion -> SHA (להוסיף אם חסר)
           int aIdx = chartLines.findIndexOf { it.trim().toLowerCase().startsWith('appversion:') }
-          if (aIdx >= 0) {
-            chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
-          } else {
-            chartLines << "appVersion: ${env.GIT_SHA}"
-          }
+          if (aIdx >= 0) chartLines[aIdx] = "appVersion: ${env.GIT_SHA}"
+          else chartLines << "appVersion: ${env.GIT_SHA}"
           writeFile file: chartPath, text: chartLines.join('\n')
 
-          // ---------- values.yaml ----------
+          // ---- values.yaml: ensure image.repository & image.tag ----
           def valuesPath = "${CHART_DIR}/values.yaml"
           def lines = readFile(valuesPath).split(/\r?\n/, -1) as List
           boolean inImage = false
@@ -79,145 +78,138 @@ pipeline {
 
           lines.each { line ->
             String trimmed = line.trim()
-            int leadLen = line.length() - trimmed.length()
-            if (leadLen < 0) leadLen = 0
+            int leadLen = Math.max(0, line.length() - trimmed.length())
 
             if (!inImage && trimmed.startsWith('image:')) {
-              inImage = true
-              imageIndent = leadLen
-              repoSet = false
-              tagSet  = false
-              out << line
-              return
+              inImage = true; imageIndent = leadLen; repoSet = false; tagSet = false
+              out << line; return
             }
-
             if (inImage) {
-              // יציאה מהבלוק (הזחה קטנה/שווה)
               if (trimmed && leadLen <= imageIndent) {
-                // הוסף מפתחות חסרים לפני היציאה
-                if (!repoSet) {
-                  def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-                  out << sp + "repository: ${DOCKER_IMAGE}"
-                }
-                if (!tagSet) {
-                  def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-                  out << sp + "tag: \"${env.GIT_SHA}\""
-                }
+                def sp = ' ' * (imageIndent + 2)
+                if (!repoSet) out << "${sp}repository: ${env.DOCKER_IMAGE}"
+                if (!tagSet)  out << "${sp}tag: \"${env.GIT_SHA}\""
                 inImage = false
-                out << line
-                return
+                out << line; return
               }
-
               if (trimmed.startsWith('repository:')) {
-                def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-                out << sp + "repository: ${DOCKER_IMAGE}"
-                repoSet = true
-                return
+                out << (' ' * (imageIndent + 2)) + "repository: ${env.DOCKER_IMAGE}"; repoSet = true; return
               }
               if (trimmed.startsWith('tag:')) {
-                def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-                out << sp + "tag: \"${env.GIT_SHA}\""
-                tagSet = true
-                return
+                out << (' ' * (imageIndent + 2)) + "tag: \"${env.GIT_SHA}\""; tagSet = true; return
               }
-
-              out << line
-              return
+              out << line; return
             }
-
             out << line
           }
-
-          // אם הסתיים הקובץ בתוך הבלוק – הוסף חסרים
           if (inImage) {
-            def sp = ''; for (int i=0; i<imageIndent+2; i++) sp += ' '
-            if (!repoSet) out << sp + "repository: ${DOCKER_IMAGE}"
-            if (!tagSet)  out << sp + "tag: \"${env.GIT_SHA}\""
+            def sp = ' ' * (imageIndent + 2)
+            if (!repoSet) out << "${sp}repository: ${env.DOCKER_IMAGE}"
+            if (!tagSet)  out << "${sp}tag: \"${env.GIT_SHA}\""
           }
-
           writeFile file: valuesPath, text: out.join('\n')
+
           echo "Chart and values updated for ${env.GIT_SHA}"
         }
       }
     }
 
-    stage('Package Chart') {
-      steps { bat "helm package -d \"${RELEASE_DIR}\" \"${CHART_DIR}\"" }
+    stage('Sanitize YAML encoding (UTF-8 no BOM)') {
+      steps {
+        // Re-save YAML files as UTF‑8 without BOM to avoid "invalid trailing UTF‑8 octet"
+        bat '''
+powershell -NoProfile -Command ^
+  "$p='helm/flaskapp/values.yaml';" ^
+  "$c = Get-Content -Raw $p; " ^
+  "[IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false))"
+
+powershell -NoProfile -Command ^
+  "$p='helm/flaskapp/Chart.yaml';" ^
+  "$c = Get-Content -Raw $p; " ^
+  "[IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false))"
+        '''
+      }
     }
 
-    // פרסום יציב ל-gh-pages באמצעות worktree (ללא stash/checkout על אותו עץ)
-    stage('Publish to gh-pages') {
-      when { branch 'main' }
+    stage('Package Chart') {
       steps {
-        withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
-          bat '''
+        bat 'helm package -d ".release" "helm/flaskapp"'
+      }
+    }
+
+    stage('Publish to gh-pages') {
+      steps {
+        bat '''
 @echo off
 setlocal enableextensions
-
-REM ודא שיש חבילה
-if not exist .release\\*.tgz (
-  echo ERROR: no .tgz under .release
-  exit /b 1
-)
-
-REM worktree ל-gh-pages
-git fetch origin gh-pages 1>NUL 2>NUL || ver >NUL
+git config user.email "ci-bot@example.com"
+git config user.name "ci-bot"
+git fetch origin gh-pages 1>NUL 2>NUL
 git worktree prune 1>NUL 2>NUL
 rmdir /S /Q ghp 1>NUL 2>NUL
-
 git worktree add -B gh-pages ghp origin/gh-pages 1>NUL 2>NUL || git worktree add -B gh-pages ghp gh-pages
-
-if not exist ghp\\docs mkdir ghp\\docs
-copy /Y .release\\*.tgz ghp\\docs\\ >NUL
-
+copy /Y .release\*.tgz ghp\ >NUL
 pushd ghp
-if exist docs\\index.yaml (
-  helm repo index docs --merge docs\\index.yaml
-) else (
-  helm repo index docs
-)
-type NUL > docs\\.nojekyll
-
-git add docs
-git -c user.name="jenkins-ci" -c user.email="jenkins@example.com" commit -m "publish chart %GIT_SHA%" || ver >NUL
-git push https://x-access-token:%GH_TOKEN%@github.com/azerez/devops0405-p3-Automation-CICD.git HEAD:gh-pages
+git add .
+git commit -m "Publish Helm chart" || ver >NUL
+git push origin gh-pages
 popd
-
 endlocal
-'''
-        }
+        '''
       }
     }
 
     stage('Build & Push Docker') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds', usernameVariable: 'DOCKERHUB_USER', passwordVariable: 'DOCKERHUB_PASS')]) {
-          bat """
+          bat '''
+@echo off
+setlocal enableextensions
 docker login -u %DOCKERHUB_USER% -p %DOCKERHUB_PASS%
-docker build -f App/Dockerfile -t ${DOCKER_IMAGE}:${env.GIT_SHA} App
-docker push ${DOCKER_IMAGE}:${env.GIT_SHA}
-"""
+docker build -f App/Dockerfile -t %DOCKER_IMAGE%:%GIT_SHA% App
+docker push %DOCKER_IMAGE%:%GIT_SHA%
+endlocal
+          '''
         }
       }
     }
 
     stage('Deploy to minikube') {
       steps {
-        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-          bat """
-helm upgrade --install ${APP_NAME} ${CHART_DIR} ^
-  --namespace ${K8S_NAMESPACE} ^
-  --set image.repository=${DOCKER_IMAGE} ^
-  --set image.tag=${env.GIT_SHA} ^
+        bat '''
+@echo off
+setlocal enableextensions
+helm upgrade --install %APP_NAME% %CHART_DIR% ^
+  --namespace %K8S_NAMESPACE% --create-namespace ^
+  --set image.repository=%DOCKER_IMAGE% ^
+  --set image.tag=%GIT_SHA% ^
   --set image.pullPolicy=IfNotPresent
-"""
-        }
+endlocal
+        '''
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        bat '''
+@echo off
+setlocal enableextensions
+kubectl -n %K8S_NAMESPACE% rollout status deploy/%APP_NAME% --timeout=120s
+for /f "usebackq delims=" %%N in (`kubectl -n %K8S_NAMESPACE% get svc %APP_NAME% -o "jsonpath={.spec.ports[0].nodePort}" 2^>NUL`) do set NODEPORT=%%N
+if not defined NODEPORT (
+  echo SERVICE %APP_NAME% not found or no NodePort exposed.
+  exit /b 1
+)
+for /f "usebackq delims=" %%I in (`minikube ip`) do set MINIKUBE_IP=%%I
+curl -s "http://%MINIKUBE_IP%:%NODEPORT%/health" || exit /b 1
+endlocal
+        '''
       }
     }
   }
 
   post {
-    always { cleanWs() }
+    success { echo "OK: SHA=${env.GIT_SHA}" }
+    always  { cleanWs() }
   }
 }
-
