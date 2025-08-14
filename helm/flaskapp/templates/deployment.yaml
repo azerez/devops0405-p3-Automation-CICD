@@ -6,6 +6,8 @@ metadata:
     app: {{ .Values.app.name }}
 spec:
   replicas: {{ .Values.replicaCount | default 1 }}
+  strategy:
+    type: {{ .Values.strategyType | default "Recreate" }}
   selector:
     matchLabels:
       app: {{ .Values.app.name }}
@@ -14,6 +16,7 @@ spec:
       labels:
         app: {{ .Values.app.name }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGraceSeconds | default 10 }}
       containers:
         - name: {{ .Values.app.name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -25,12 +28,16 @@ spec:
             httpGet:
               path: {{ .Values.healthPath | default "/health" }}
               port: http
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds | default 5 }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds | default 5 }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold | default 6 }}
           livenessProbe:
             httpGet:
               path: {{ .Values.healthPath | default "/health" }}
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds | default 10 }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds | default 10 }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds | default 2 }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold | default 3 }}
 
