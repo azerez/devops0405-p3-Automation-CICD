@@ -12,5 +12,10 @@ spec:
     app.kubernetes.io/name: {{ include "flaskapp.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
-    - port: {{ .Values.service.port }}
-      targetPort: {{ .Values.containerPort }}
+    - name: http
+      protocol: TCP
+      port: {{ .Values.service.port | default 80 }}
+      targetPort: {{ .Values.containerPort | default 5000 }}
+      {{- if and (eq .Values.service.type "NodePort") (not (empty .Values.service.nodePort)) }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
