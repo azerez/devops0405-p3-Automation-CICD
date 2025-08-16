@@ -101,7 +101,7 @@ EOF
       }
     }
 
-    stage('Commit Helm Version to Git (Option A)') {
+    stage('Commit Helm Version to Git') {
       steps {
         sh '''
           # Commit only if files under helm/ changed or forced
