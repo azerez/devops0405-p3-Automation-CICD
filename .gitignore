@@ -4,3 +4,7 @@ verify.sh
 README.md
 README-INSTALL.txt
 Tools/
+
+# --- keep project readme files ---
+!README
+!README.md
