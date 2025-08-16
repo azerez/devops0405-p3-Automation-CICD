@@ -68,7 +68,7 @@ pipeline {
       }
     }
 
-    stage('Helm Version Bump (only if helm/** changed or forced)') {
+    stage('Helm Version Bump') {
       steps {
         sh '''
           set -e
@@ -137,7 +137,7 @@ EOF
       }
     }
 
-    stage('Helm Package (only if helm/** changed or forced)') {
+    stage('Helm Package') {
       steps {
         sh '''
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
@@ -153,7 +153,7 @@ EOF
       }
     }
 
-    stage('Helm Publish (OCI) - only if helm/** changed or forced)') {
+    stage('Helm Publish-OCI') {
       steps {
         sh '''
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
@@ -177,7 +177,7 @@ EOF
       }
     }
 
-    stage('Deploy to Kubernetes (main only)') {
+    stage('Deploy to Kubernetes') {
       when { branch 'main' }
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
