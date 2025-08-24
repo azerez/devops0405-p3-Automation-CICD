@@ -93,9 +93,9 @@ EOF
       steps {
         sh '''
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
-            echo "Committing Chart.yaml back to main..."
+            echo "[INFO] Commit Chart.yaml back to main..."
           else
-            echo "No helm changes — skipping commit."
+            echo "[INFO] No helm changes — skipping commit."
             exit 0
           fi
         '''
@@ -106,8 +106,18 @@ EOF
             git config user.name  "CI Bot"
 
             origin="$(git config --get remote.origin.url)"
-            origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\.git$##')"
+            # --- Conversion without sed/regex (clear & Groovy-safe) ---
+            # git@github.com:user/repo.git -> https://github.com/user/repo.git
+            case "$origin" in
+              git@github.com:*) origin="${origin/git@github.com:/https://github.com/}";;
+            esac
+            # Derive repo_path = user/repo (strip protocol/host and .git)
+            repo_path="$origin"
+            repo_path="${repo_path#https://github.com/}"
+            repo_path="${repo_path#http://github.com/}"
+            repo_path="${repo_path%.git}"
+            # ----------------------------------------------------------
+
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -116,6 +126,7 @@ EOF
             git commit -m "ci(helm): bump chart to ${VER} [skip ci]" || true
             git push origin HEAD:main
 
+            # restore remote
             git remote set-url origin "https://github.com/${repo_path}.git"
           '''
         }
@@ -130,7 +141,7 @@ EOF
             helm package "${HELM_CHART_DIR}" -d helm/dist
             ls -l helm/dist
           else
-            echo "No helm changes — skipping package."
+            echo "[INFO] No helm changes — skipping package."
           fi
         '''
         archiveArtifacts artifacts: 'helm/dist/*.tgz', fingerprint: true, allowEmptyArchive: true
@@ -141,9 +152,9 @@ EOF
       steps {
         sh '''
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
-            echo "Will publish Helm chart to OCI..."
+            echo "[INFO] Will publish Helm chart to OCI..."
           else
-            echo "No helm changes — skipping publish."
+            echo "[INFO] No helm changes — skipping publish."
             exit 0
           fi
         '''
@@ -153,6 +164,7 @@ EOF
           sh '''
             helm registry login -u "$DH_USER" -p "$DH_PASS" registry-1.docker.io
             CHART_TGZ="$(ls -t helm/dist/*.tgz | head -n1)"
+            echo "[INFO] Pushing chart: $CHART_TGZ"
             helm push "$CHART_TGZ" oci://registry-1.docker.io/${DH_USER}
           '''
         }
