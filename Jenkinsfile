@@ -37,12 +37,6 @@ pipeline {
       }
     }
 
-    stage('Test') {
-      steps {
-        sh 'echo "No unit tests yet - skipping (course project)"; true'
-      }
-    }
-
     stage('Push Docker Image') {
       steps {
         withCredentials([usernamePassword(credentialsId: 'docker-hub-creds',
@@ -177,7 +171,10 @@ EOF
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
           sh '''
             export KUBECONFIG="$KCFG"
-            helm upgrade --install flaskapp "${HELM_CHART_DIR}"               --namespace dev --create-namespace               --set image.repository=${DOCKER_IMAGE}               --set image.tag=${GIT_SHORT}
+            helm upgrade --install flaskapp "${HELM_CHART_DIR}" \
+              --namespace dev --create-namespace \
+              --set image.repository=${DOCKER_IMAGE} \
+              --set image.tag=${GIT_SHORT}
           '''
         }
       }
@@ -215,7 +212,8 @@ EOF
             echo "[INFO] In-Cluster Smoke Test"
             SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp -o jsonpath="{.items[0].metadata.name}" || echo "flaskapp")
             PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
-            kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 --               -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ | grep 200
+            kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 -- \
+              -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ | grep 200
             echo "[OK]   Service healthy (HTTP 200)"
           else
             echo "[INFO] Skipping K8s rollout & smoke test (branch not main)."
