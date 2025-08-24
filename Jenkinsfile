@@ -1,3 +1,4 @@
+\
 // Jenkinsfile — Declarative pipeline tuned to your credentials IDs
 // Uses: docker-hub-creds (username+password or PAT), github-token (Secret text), kubeconfig (Kubeconfig file)
 
@@ -115,7 +116,8 @@ EOF
             origin="$(git config --get remote.origin.url)"
             # Normalize to https and inject token
             origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\.git$##')"
+            # IMPORTANT: escape '.' for Groovy parsing inside single-quoted here-doc
+            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\\\.git$##')"
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -178,7 +180,10 @@ EOF
           sh '''
             set -e
             export KUBECONFIG="$KCFG"
-            helm upgrade --install flaskapp "${HELM_CHART_DIR}"               --namespace dev --create-namespace               --set image.repository=${DOCKER_IMAGE}               --set image.tag=${GIT_SHORT}
+            helm upgrade --install flaskapp "${HELM_CHART_DIR}" \
+              --namespace dev --create-namespace \
+              --set image.repository=${DOCKER_IMAGE} \
+              --set image.tag=${GIT_SHORT}
           '''
         }
       }
@@ -257,10 +262,12 @@ EOF
                 kubectl -n dev rollout status deploy/flaskapp --timeout=90s
                 echo "✅ Deployment rollout completed."
 
-                SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp                       -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "flaskapp")
+                SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp \
+                      -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "flaskapp")
                 PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
                 
-                kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 --                   -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ > /tmp/http_code.txt
+                kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 -- \
+                  -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ > /tmp/http_code.txt
 
                 CODE=$(cat /tmp/http_code.txt)
                 if [ "$CODE" -ne 200 ]; then
