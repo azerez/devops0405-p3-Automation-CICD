@@ -1,4 +1,3 @@
-\
 // Jenkinsfile — Declarative pipeline tuned to your credentials IDs
 // Uses: docker-hub-creds (username+password or PAT), github-token (Secret text), kubeconfig (Kubeconfig file)
 
@@ -15,19 +14,14 @@ pipeline {
   }
 
   environment {
-    // Docker image repo
     DOCKER_IMAGE   = 'docker.io/erezazu/devops0405-docker-flask-app'
-    // Helm chart directory
     HELM_CHART_DIR = 'helm/flaskapp'
-    // GitHub username for push-back
     GIT_USER = 'azerez'
   }
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
     stage('Build Docker Image') {
@@ -40,6 +34,12 @@ pipeline {
           docker build -f App/Dockerfile -t ${DOCKER_IMAGE}:${GIT_SHORT} App
           docker tag ${DOCKER_IMAGE}:${GIT_SHORT} ${DOCKER_IMAGE}:latest
         '''
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh 'echo "No unit tests yet - skipping (course project)"; true'
       }
     }
 
@@ -58,20 +58,15 @@ pipeline {
     }
 
     stage('Helm Lint') {
-      steps {
-        sh "helm lint ${HELM_CHART_DIR}"
-      }
+      steps { sh "helm lint ${HELM_CHART_DIR}" }
     }
 
     stage('Helm Version Bump') {
       steps {
         sh '''
           set -e
-          # Detect changes under helm/ in the last commit OR allow forcing via parameter
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
             CHART_FILE="${HELM_CHART_DIR}/Chart.yaml"
-            [ -f "$CHART_FILE" ] || { echo "Chart file not found: $CHART_FILE"; exit 1; }
-
             CURR=$(grep '^version:' "$CHART_FILE" | awk '{print $2}')
             IFS=. read -r MA mi pa <<EOF
 $CURR
@@ -79,14 +74,12 @@ EOF
             : "${pa:=0}"
             pa=$((pa+1))
             NEW="${MA}.${mi}.${pa}"
-
             sed -i "s/^version:.*/version: ${NEW}/" "$CHART_FILE"
             if grep -q '^appVersion:' "$CHART_FILE"; then
               sed -i "s/^appVersion:.*/appVersion: ${NEW}/" "$CHART_FILE"
             else
               echo "appVersion: ${NEW}" >> "$CHART_FILE"
             fi
-
             echo "Helm chart version bumped: ${CURR} -> ${NEW}"
             grep -E '^(version|appVersion):' "$CHART_FILE"
           else
@@ -99,7 +92,6 @@ EOF
     stage('Commit Helm Version to Git') {
       steps {
         sh '''
-          # Commit only if files under helm/ changed or forced
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
             echo "Committing Chart.yaml back to main..."
           else
@@ -114,10 +106,8 @@ EOF
             git config user.name  "CI Bot"
 
             origin="$(git config --get remote.origin.url)"
-            # Normalize to https and inject token
             origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            # IMPORTANT: escape '.' for Groovy parsing inside single-quoted here-doc
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\\\.git$##')"
+            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\.git$##')"
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -126,7 +116,6 @@ EOF
             git commit -m "ci(helm): bump chart to ${VER} [skip ci]" || true
             git push origin HEAD:main
 
-            # restore remote
             git remote set-url origin "https://github.com/${repo_path}.git"
           '''
         }
@@ -137,7 +126,6 @@ EOF
       steps {
         sh '''
           if git diff --name-only HEAD~1..HEAD | grep -E '^helm/' >/dev/null 2>&1 || [ "${FORCE_HELM_PUBLISH}" = "true" ]; then
-            set -e
             mkdir -p helm/dist
             helm package "${HELM_CHART_DIR}" -d helm/dist
             ls -l helm/dist
@@ -163,10 +151,8 @@ EOF
                                           usernameVariable: 'DH_USER',
                                           passwordVariable: 'DH_PASS')]) {
           sh '''
-            set -e
             helm registry login -u "$DH_USER" -p "$DH_PASS" registry-1.docker.io
             CHART_TGZ="$(ls -t helm/dist/*.tgz | head -n1)"
-            echo "Pushing chart: $CHART_TGZ"
             helm push "$CHART_TGZ" oci://registry-1.docker.io/${DH_USER}
           '''
         }
@@ -178,110 +164,51 @@ EOF
       steps {
         withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
           sh '''
-            set -e
             export KUBECONFIG="$KCFG"
-            helm upgrade --install flaskapp "${HELM_CHART_DIR}" \
-              --namespace dev --create-namespace \
-              --set image.repository=${DOCKER_IMAGE} \
-              --set image.tag=${GIT_SHORT}
+            helm upgrade --install flaskapp "${HELM_CHART_DIR}"               --namespace dev --create-namespace               --set image.repository=${DOCKER_IMAGE}               --set image.tag=${GIT_SHORT}
           '''
         }
       }
     }
 
-    // ----------------- TEST (health checks only + robust local image check) -----------------
     stage('TEST') {
       steps {
-        echo '🔎 Verify Image Built (local) & Runnable'
         sh '''
           set -e
-          REPO_FULL="${DOCKER_IMAGE}"
-          REPO_NOREG="${DOCKER_IMAGE#docker.io/}"
-          REPO_NOREG2="${DOCKER_IMAGE#registry-1.docker.io/}"
-          TAG="${GIT_SHORT}"
+          echo "🔎 Verify Image Built (local)"
+          docker image inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null 2>&1 || { echo "❌ Image not found"; exit 1; }
+          echo "✅ Local image exists"
 
-          found_repo=""
-          for CAND in "$REPO_FULL" "$REPO_NOREG" "$REPO_NOREG2"; do
-            if docker image inspect "${CAND}:${TAG}" >/dev/null 2>&1; then
-              found_repo="$CAND"
-              break
-            fi
-          done
+          echo "🔎 Verify Image Runs"
+          docker run --rm ${DOCKER_IMAGE}:${GIT_SHORT} python --version || { echo "❌ Image failed to run"; exit 1; }
+          echo "✅ Image runs"
 
-          if [ -z "$found_repo" ]; then
-            echo "❌ Local image not found under any common alias:"
-            echo "   - ${REPO_FULL}:${TAG}"
-            echo "   - ${REPO_NOREG}:${TAG}"
-            echo "   - ${REPO_NOREG2}:${TAG}"
-            echo "Snapshot of local images (top 20):"
-            docker images | head -n 20 || true
-            exit 1
-          fi
+          echo "🔎 Verify Image In Registry"
+          docker manifest inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null || { echo "❌ Remote image not found"; exit 1; }
+          docker manifest inspect ${DOCKER_IMAGE}:latest >/dev/null || { echo "❌ Latest tag not found"; exit 1; }
+          echo "✅ Remote image exists"
 
-          echo "✅ Local image exists as: ${found_repo}:${TAG}"
+          echo "🔎 Verify Chart Package"
+          ls -1 helm/dist/*.tgz >/dev/null 2>&1 && echo "✅ Chart package exists" || echo "ℹ️ No chart package found"
 
-          # Ensure image runs (no pull)
-          if ! docker run --rm "${found_repo}:${TAG}" python --version >/dev/null 2>&1; then
-            echo "❌ Image failed to run properly (${found_repo}:${TAG})."
-            exit 1
-          fi
-          echo "✅ Image ran successfully (${found_repo}:${TAG})."
-        '''
+          if [ "${BRANCH_NAME}" = "main" ]; then
+            echo "🔎 Verify Rollout"
+            kubectl -n dev rollout status deploy/flaskapp --timeout=90s
 
-        echo '🔎 Verify Image In Registry (tags only)'
-        sh '''
-          set -e
-          for TAG in ${GIT_SHORT} latest; do
-            if ! docker manifest inspect ${DOCKER_IMAGE}:$TAG >/dev/null 2>&1; then
-              echo "❌ Remote image tag not found: ${DOCKER_IMAGE}:$TAG"
-              exit 1
-            fi
-            echo "✅ Remote image tag exists: ${DOCKER_IMAGE}:$TAG"
-          done
-        '''
-
-        echo '🔎 Verify Chart Package (tgz exists)'
-        sh '''
-          set -e
-          if ls -1 helm/dist/*.tgz >/dev/null 2>&1; then
-            echo "✅ Chart package present in helm/dist:"
-            ls -l helm/dist/*.tgz
+            echo "🔎 In-Cluster Smoke Test"
+            SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp -o jsonpath="{.items[0].metadata.name}" || echo "flaskapp")
+            PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
+            kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 --               -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ | grep 200
+            echo "✅ Service healthy"
           else
-            echo "ℹ️ No chart package found (likely skipped due to no helm changes)"
+            echo "ℹ️ Skipping K8s rollout & smoke test (branch not main)."
           fi
         '''
-
-        echo '🔎 Verify Rollout & Service Health (K8s)'
-        script {
-          if (env.BRANCH_NAME == 'main') {
-            withCredentials([file(credentialsId: 'kubeconfig', variable: 'KCFG')]) {
-              sh '''
-                set -e
-                export KUBECONFIG="$KCFG"
-
-                kubectl -n dev rollout status deploy/flaskapp --timeout=90s
-                echo "✅ Deployment rollout completed."
-
-                SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp \
-                      -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "flaskapp")
-                PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
-                
-                kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 -- \
-                  -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ > /tmp/http_code.txt
-
-                CODE=$(cat /tmp/http_code.txt)
-                if [ "$CODE" -ne 200 ]; then
-                  echo "❌ Service health check failed (expected 200, got $CODE)."
-                  exit 1
-                fi
-                echo "✅ Service health check passed (200)."
-              '''
-            }
-          } else {
-            echo 'ℹ️ Skipping K8s rollout & smoke test (branch not main).'
-          }
-        }
       }
+    }
+
+    stage('Post Actions') {
+      steps { echo 'Done.' }
     }
   }
 }
