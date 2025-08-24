@@ -55,7 +55,7 @@ devops0405-p3-Automation-CICD/
 4. Helm Lint ✅  
    helm lint helm/flaskapp to validate chart structure/templates.
 
-5. Helm Version Bump (conditional) 🔖  
+5. Helm Version Bump 🔖  
    Only if files under helm/** changed (or a force path is set):
    - Auto‑bump patch in Chart.yaml (e.g., `0.1.1 → 0.1.2`) and align appVersion.
    - Print what changed (old → new).
@@ -64,10 +64,10 @@ devops0405-p3-Automation-CICD/
    Commit the bumped Chart.yaml with message:  
    `ci(helm): bump chart to X.Y.Z [skip ci] and push back to main using a GitHub token.
 
-7. Helm Package (conditional) 📦  
+7. Helm Package 📦  
    helm package produces helm/dist/flaskapp-<ver>.tgz (archived in Jenkins).
 
-8. Helm Publish (OCI, conditional) ☸️  
+8. Helm Publish-OCI ☸️  
    Log in to the Helm registry and push the packaged chart to:  
    oci://registry-1.docker.io/erezazu/flaskapp (0.1.x tags accumulate).
 
