@@ -8,3 +8,4 @@ Tools/
 # --- keep project readme files ---
 !README
 !README.md
+Jenkinsfile_bck_orig_fix
