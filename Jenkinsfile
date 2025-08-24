@@ -115,7 +115,7 @@ EOF
             origin="$(git config --get remote.origin.url)"
             # Normalize to https and inject token
             origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\.git$##')"
+            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\.git$##')"
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -201,7 +201,6 @@ EOF
         echo '🔎 Verify Image Runs Successfully'
         sh '''
           set -e
-          # מריץ את הקונטיינר עם פקודה פשוטה כדי לוודא שהאימג' runnable
           if ! docker run --rm ${DOCKER_IMAGE}:${GIT_SHORT} python --version >/dev/null 2>&1; then
             echo "❌ Image failed to run properly."
             exit 1
@@ -240,11 +239,9 @@ EOF
                 set -e
                 export KUBECONFIG="$KCFG"
 
-                # Verify rollout
                 kubectl -n dev rollout status deploy/flaskapp --timeout=90s
                 echo "✅ Deployment rollout completed."
 
-                # Service health (in-cluster curl)
                 SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp                       -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || echo "flaskapp")
                 PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
                 
