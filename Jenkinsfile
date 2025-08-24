@@ -115,7 +115,7 @@ EOF
             origin="$(git config --get remote.origin.url)"
             # Normalize to https and inject token
             origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\.git$##')"
+            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\.git$##')"
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -184,28 +184,43 @@ EOF
       }
     }
 
-    // ----------------- TEST (health checks only + image run check) -----------------
+    // ----------------- TEST (health checks only + robust local image check) -----------------
     stage('TEST') {
       steps {
-        echo '🔎 Verify Image Built (local)'
+        echo '🔎 Verify Image Built (local) & Runnable'
         sh '''
           set -e
-          IMG_ID=$(docker images -q ${DOCKER_IMAGE}:${GIT_SHORT} || true)
-          if [ -z "$IMG_ID" ]; then
-            echo "❌ Image ${DOCKER_IMAGE}:${GIT_SHORT} not found locally"
-            exit 1
-          fi
-          echo "✅ Local image exists: ${DOCKER_IMAGE}:${GIT_SHORT} ($IMG_ID)"
-        '''
+          REPO_FULL="${DOCKER_IMAGE}"
+          REPO_NOREG="${DOCKER_IMAGE#docker.io/}"
+          REPO_NOREG2="${DOCKER_IMAGE#registry-1.docker.io/}"
+          TAG="${GIT_SHORT}"
 
-        echo '🔎 Verify Image Runs Successfully'
-        sh '''
-          set -e
-          if ! docker run --rm ${DOCKER_IMAGE}:${GIT_SHORT} python --version >/dev/null 2>&1; then
-            echo "❌ Image failed to run properly."
+          found_repo=""
+          for CAND in "$REPO_FULL" "$REPO_NOREG" "$REPO_NOREG2"; do
+            if docker image inspect "${CAND}:${TAG}" >/dev/null 2>&1; then
+              found_repo="$CAND"
+              break
+            fi
+          done
+
+          if [ -z "$found_repo" ]; then
+            echo "❌ Local image not found under any common alias:"
+            echo "   - ${REPO_FULL}:${TAG}"
+            echo "   - ${REPO_NOREG}:${TAG}"
+            echo "   - ${REPO_NOREG2}:${TAG}"
+            echo "Snapshot of local images (top 20):"
+            docker images | head -n 20 || true
             exit 1
           fi
-          echo "✅ Image ran successfully."
+
+          echo "✅ Local image exists as: ${found_repo}:${TAG}"
+
+          # Ensure image runs (no pull)
+          if ! docker run --rm "${found_repo}:${TAG}" python --version >/dev/null 2>&1; then
+            echo "❌ Image failed to run properly (${found_repo}:${TAG})."
+            exit 1
+          fi
+          echo "✅ Image ran successfully (${found_repo}:${TAG})."
         '''
 
         echo '🔎 Verify Image In Registry (tags only)'
