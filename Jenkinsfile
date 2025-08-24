@@ -107,7 +107,7 @@ EOF
 
             origin="$(git config --get remote.origin.url)"
             origin="$(echo "$origin" | sed -E 's#^git@github.com:#https://github.com/#')"
-            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\\.git$##')"
+            repo_path="$(echo "$origin" | sed -E 's#^https?://[^/]+/##; s#\.git$##')"
             origin_auth="https://${GIT_USER}:${GTOKEN}@github.com/${repo_path}.git"
             git remote set-url origin "$origin_auth"
 
@@ -175,33 +175,38 @@ EOF
       steps {
         sh '''
           set -e
-          echo "🔎 Verify Image Built (local)"
-          docker image inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null 2>&1 || { echo "❌ Image not found"; exit 1; }
-          echo "✅ Local image exists"
+          echo "[INFO] Verify Image Built (local)"
+          docker image inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null 2>&1 || { echo "[ERROR] Image not found"; exit 1; }
+          echo "[OK]   Local image exists"
 
-          echo "🔎 Verify Image Runs"
-          docker run --rm ${DOCKER_IMAGE}:${GIT_SHORT} python --version || { echo "❌ Image failed to run"; exit 1; }
-          echo "✅ Image runs"
+          echo "[INFO] Verify Image Runs"
+          docker run --rm ${DOCKER_IMAGE}:${GIT_SHORT} python --version >/dev/null 2>&1 || { echo "[ERROR] Image failed to run"; exit 1; }
+          echo "[OK]   Image runs"
 
-          echo "🔎 Verify Image In Registry"
-          docker manifest inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null || { echo "❌ Remote image not found"; exit 1; }
-          docker manifest inspect ${DOCKER_IMAGE}:latest >/dev/null || { echo "❌ Latest tag not found"; exit 1; }
-          echo "✅ Remote image exists"
+          echo "[INFO] Verify Image In Registry"
+          docker manifest inspect ${DOCKER_IMAGE}:${GIT_SHORT} >/dev/null || { echo "[ERROR] Remote image not found"; exit 1; }
+          docker manifest inspect ${DOCKER_IMAGE}:latest >/dev/null || { echo "[ERROR] Latest tag not found"; exit 1; }
+          echo "[OK]   Remote image exists"
 
-          echo "🔎 Verify Chart Package"
-          ls -1 helm/dist/*.tgz >/dev/null 2>&1 && echo "✅ Chart package exists" || echo "ℹ️ No chart package found"
+          echo "[INFO] Verify Chart Package"
+          if ls -1 helm/dist/*.tgz >/dev/null 2>&1; then
+            echo "[OK]   Chart package exists"
+          else
+            echo "[INFO] No chart package found (probably skipped due to no helm changes)"
+          fi
 
           if [ "${BRANCH_NAME}" = "main" ]; then
-            echo "🔎 Verify Rollout"
+            echo "[INFO] Verify Rollout"
             kubectl -n dev rollout status deploy/flaskapp --timeout=90s
+            echo "[OK]   Deployment rollout completed"
 
-            echo "🔎 In-Cluster Smoke Test"
+            echo "[INFO] In-Cluster Smoke Test"
             SVC=$(kubectl -n dev get svc -l app.kubernetes.io/instance=flaskapp -o jsonpath="{.items[0].metadata.name}" || echo "flaskapp")
             PORT=$(kubectl -n dev get svc "$SVC" -o jsonpath="{.spec.ports[0].port}")
             kubectl -n dev run curl-tester --rm -i --restart=Never --image=curlimages/curl:8.8.0 --               -s -o /dev/null -w "%{http_code}" http://$SVC.dev.svc.cluster.local:$PORT/ | grep 200
-            echo "✅ Service healthy"
+            echo "[OK]   Service healthy (HTTP 200)"
           else
-            echo "ℹ️ Skipping K8s rollout & smoke test (branch not main)."
+            echo "[INFO] Skipping K8s rollout & smoke test (branch not main)."
           fi
         '''
       }
